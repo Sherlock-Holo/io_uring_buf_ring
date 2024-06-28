@@ -14,11 +14,49 @@ use crate::raw_types::{io_uring_buf, io_uring_buf_ring};
 
 mod raw_types;
 
-fn br_setup<S, C>(
-    ring: &IoUring<S, C>,
-    ring_entries: u16,
-    bgid: u16,
-) -> io::Result<NonNull<io_uring_buf_ring>>
+struct BufRingMmap {
+    ptr: NonNull<io_uring_buf_ring>,
+    size: usize,
+}
+
+impl BufRingMmap {
+    fn new(size: usize) -> io::Result<Self> {
+        let ptr = unsafe {
+            // Safety: we will check the ptr
+            mmap_anonymous(
+                ptr::null_mut(),
+                size,
+                ProtFlags::READ | ProtFlags::WRITE,
+                MapFlags::PRIVATE,
+            )
+        }?;
+        let ptr = NonNull::new(ptr)
+            .ok_or_else(|| io::Error::new(ErrorKind::Other, "mmap return null ptr"))?;
+
+        Ok(Self {
+            ptr: ptr.cast(),
+            size,
+        })
+    }
+
+    fn as_mut(&mut self) -> &mut io_uring_buf_ring {
+        // Safety: ptr is init
+        unsafe { self.ptr.as_mut() }
+    }
+
+    fn as_ptr(&self) -> *mut io_uring_buf_ring {
+        self.ptr.as_ptr()
+    }
+}
+
+impl Drop for BufRingMmap {
+    fn drop(&mut self) {
+        // Safety: we own the buf_ring
+        let _ = unsafe { munmap(self.ptr.as_ptr() as _, self.size) };
+    }
+}
+
+fn br_setup<S, C>(ring: &IoUring<S, C>, ring_entries: u16, bgid: u16) -> io::Result<BufRingMmap>
 where
     S: squeue::EntryMarker,
     C: cqueue::EntryMarker,
@@ -26,29 +64,13 @@ where
     let ring_size = ring_entries as usize * size_of::<io_uring_buf>();
 
     unsafe {
-        // Safety: we will check the ptr
-        let ptr = mmap_anonymous(
-            ptr::null_mut(),
-            ring_size,
-            ProtFlags::READ | ProtFlags::WRITE,
-            MapFlags::PRIVATE,
-        )?;
-        let ptr = NonNull::new(ptr)
-            .ok_or_else(|| io::Error::new(ErrorKind::Other, "mmap return null ptr"))?;
+        let buf_ring_mmap = BufRingMmap::new(ring_size)?;
 
-        // Safety: ptr and nentries are valid
-        match ring
-            .submitter()
-            .register_buf_ring(ptr.as_ptr() as _, ring_entries, bgid)
-        {
-            Err(err) => {
-                let _ = munmap(ptr.as_ptr(), ring_size);
+        // Safety: ring_entries are valid
+        ring.submitter()
+            .register_buf_ring(buf_ring_mmap.as_ptr() as _, ring_entries, bgid)?;
 
-                Err(err)
-            }
-
-            Ok(_) => Ok(ptr.cast()),
-        }
+        Ok(buf_ring_mmap)
     }
 }
 
@@ -56,30 +78,30 @@ fn io_uring_setup_buf_ring<S, C>(
     ring: &IoUring<S, C>,
     ring_entries: u16,
     bgid: u16,
-) -> io::Result<NonNull<io_uring_buf_ring>>
+) -> io::Result<BufRingMmap>
 where
     S: squeue::EntryMarker,
     C: cqueue::EntryMarker,
 {
-    let buf_ring_ptr = br_setup(ring, ring_entries, bgid)?;
+    let buf_ring_mmap = br_setup(ring, ring_entries, bgid)?;
 
     unsafe {
         // Safety: buf_ring_ptr is valid
-        (*buf_ring_ptr.as_ptr())
+        (*buf_ring_mmap.as_ptr())
             .__bindgen_anon_1
             .__bindgen_anon_1
             .as_mut()
             .tail = 0;
     }
 
-    Ok(buf_ring_ptr)
+    Ok(buf_ring_mmap)
 }
 
 /// Buffer ring
 ///
 /// register buffer ring for io-uring provided buffers
 pub struct IoUringBufRing {
-    ptr: NonNull<io_uring_buf_ring>,
+    buf_ring_mmap: BufRingMmap,
     bufs: UnsafeCell<Vec<Vec<u8>>>,
     bgid: u16,
 
@@ -100,14 +122,14 @@ impl IoUringBufRing {
         C: cqueue::EntryMarker,
     {
         ring_entries = ring_entries.next_power_of_two();
-        let mut ptr = io_uring_setup_buf_ring(ring, ring_entries, bgid)?;
+        let mut buf_ring_mmap = io_uring_setup_buf_ring(ring, ring_entries, bgid)?;
         let mut bufs = vec![Vec::with_capacity(buf_size); ring_entries as _];
 
         for (id, buf) in bufs.iter_mut().enumerate() {
             // Safety: all arguments are valid
             unsafe {
                 io_uring_buf_ring_add(
-                    ptr.as_mut(),
+                    buf_ring_mmap.as_mut(),
                     buf.as_mut_ptr(),
                     buf.capacity(),
                     id as _,
@@ -117,13 +139,10 @@ impl IoUringBufRing {
             }
         }
 
-        unsafe {
-            // Safety: we own the ptr
-            io_uring_buf_ring_advance(ptr.as_mut(), ring_entries);
-        }
+        io_uring_buf_ring_advance(buf_ring_mmap.as_mut(), ring_entries);
 
         Ok(Self {
-            ptr,
+            buf_ring_mmap,
             bufs: UnsafeCell::new(bufs),
             bgid,
             _marker: Default::default(),
@@ -160,17 +179,6 @@ impl IoUringBufRing {
     }
 }
 
-impl Drop for IoUringBufRing {
-    fn drop(&mut self) {
-        let _ = unsafe {
-            munmap(
-                self.ptr.as_ptr() as _,
-                self.bufs.get_mut().len() * size_of::<io_uring_buf>(),
-            )
-        };
-    }
-}
-
 /// Borrowed buffer from [`IoUringBufRing`]
 pub struct BorrowedBuffer<'a> {
     id: u16,
@@ -199,8 +207,10 @@ impl DerefMut for BorrowedBuffer<'_> {
 impl Drop for BorrowedBuffer<'_> {
     fn drop(&mut self) {
         unsafe {
+            let buf_ring = &mut *self.buf_ring.buf_ring_mmap.as_ptr();
+
             io_uring_buf_ring_add(
-                &mut *self.buf_ring.ptr.as_ptr(),
+                buf_ring,
                 self.ptr,
                 self.len,
                 self.id,
@@ -208,7 +218,7 @@ impl Drop for BorrowedBuffer<'_> {
                 self.id as _,
             );
 
-            io_uring_buf_ring_advance(&mut *self.buf_ring.ptr.as_ptr(), 1);
+            io_uring_buf_ring_advance(buf_ring, 1);
         }
     }
 }

@@ -6,14 +6,13 @@
 //! developers how to init the `io_uring_buf_ring` correctly. Instead, the `liburing` c libs has a
 //! better doc, its provider better helper functions, we can use rust imitate its codes easily
 
-use std::fmt::{Debug, Formatter};
-use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::{fmt, mem, slice};
+use std::{mem, slice};
 
 #[repr(C)]
 #[derive(Default)]
 pub struct __IncompleteArrayField<T>(PhantomData<T>, [T; 0]);
+
 impl<T> __IncompleteArrayField<T> {
     #[inline]
     pub const fn new() -> Self {
@@ -36,13 +35,10 @@ impl<T> __IncompleteArrayField<T> {
         slice::from_raw_parts_mut(self.as_mut_ptr(), len)
     }
 }
-impl<T> Debug for __IncompleteArrayField<T> {
-    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
-        fmt.write_str("__IncompleteArrayField")
-    }
-}
+
 #[repr(C)]
 pub struct __BindgenUnionField<T>(PhantomData<T>);
+
 impl<T> __BindgenUnionField<T> {
     #[inline]
     pub const fn new() -> Self {
@@ -57,32 +53,29 @@ impl<T> __BindgenUnionField<T> {
         mem::transmute(self)
     }
 }
+
 impl<T> Default for __BindgenUnionField<T> {
     #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
+
 impl<T> Clone for __BindgenUnionField<T> {
     #[inline]
     fn clone(&self) -> Self {
         *self
     }
 }
+
 impl<T> Copy for __BindgenUnionField<T> {}
-impl<T> Debug for __BindgenUnionField<T> {
-    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
-        fmt.write_str("__BindgenUnionField")
-    }
-}
-impl<T> Hash for __BindgenUnionField<T> {
-    fn hash<H: Hasher>(&self, _state: &mut H) {}
-}
+
 impl<T> PartialEq for __BindgenUnionField<T> {
     fn eq(&self, _other: &__BindgenUnionField<T>) -> bool {
         true
     }
 }
+
 impl<T> Eq for __BindgenUnionField<T> {}
 
 #[repr(C)]
