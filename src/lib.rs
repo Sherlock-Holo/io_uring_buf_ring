@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::ptr::{addr_of_mut, NonNull};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::{io, ptr, slice};
+use std::{io, ptr};
 
 use io_uring::{cqueue, squeue, IoUring};
 use rustix::mm::{mmap_anonymous, munmap, MapFlags, ProtFlags};
@@ -97,11 +97,13 @@ impl IoUringBufRing {
     /// time
     pub unsafe fn get_buf(&self, id: u16, available_len: usize) -> Option<BorrowedBuffer> {
         let buf = (*self.bufs.get()).get_mut(id as usize)?;
+        debug_assert!(available_len <= buf.capacity());
+        buf.set_len(available_len);
 
         Some(BorrowedBuffer {
+            buf: buf.as_mut() as _,
+            capacity: buf.capacity(),
             id,
-            ptr: buf.as_mut_ptr(),
-            len: available_len,
             buf_ring: self,
             _marker: Default::default(),
         })
@@ -127,7 +129,7 @@ impl IoUringBufRing {
             // Safety: all arguments are valid
             unsafe {
                 self.io_uring_buf_ring_add(
-                    buf.as_mut_ptr(),
+                    buf.as_mut(),
                     buf.capacity(),
                     id as _,
                     (ring_entries - 1) as _,
@@ -146,8 +148,8 @@ impl IoUringBufRing {
     /// caller must make sure release valid buffer
     unsafe fn release_borrowed_buffer(&self, buffer: &mut BorrowedBuffer) {
         self.io_uring_buf_ring_add(
-            buffer.ptr,
-            buffer.len,
+            buffer.buf,
+            buffer.capacity,
             buffer.id,
             (*self.bufs.get()).len() as c_int - 1,
             buffer.id as _,
@@ -189,8 +191,8 @@ impl IoUringBufRing {
     /// caller must make sure all arguments are valid
     unsafe fn io_uring_buf_ring_add(
         &self,
-        buf_addr: *mut u8,
-        buf_len: usize,
+        buf: *mut [u8],
+        capacity: usize,
         bid: u16,
         mask: c_int,
         buf_offset: c_int,
@@ -208,8 +210,8 @@ impl IoUringBufRing {
             .as_mut_ptr()
             .offset(index);
 
-        (*ptr).addr = buf_addr as _;
-        (*ptr).len = buf_len as _;
+        (*ptr).addr = buf as *mut u8 as _;
+        (*ptr).len = capacity as _;
         (*ptr).bid = bid;
     }
 
@@ -228,9 +230,9 @@ impl IoUringBufRing {
 
 /// Borrowed buffer from [`IoUringBufRing`]
 pub struct BorrowedBuffer<'a> {
+    buf: *mut [u8],
+    capacity: usize,
     id: u16,
-    ptr: *mut u8,
-    len: usize,
 
     buf_ring: &'a IoUringBufRing,
 
@@ -241,13 +243,13 @@ impl Deref for BorrowedBuffer<'_> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        unsafe { slice::from_raw_parts(self.ptr, self.len) }
+        unsafe { &*self.buf }
     }
 }
 
 impl DerefMut for BorrowedBuffer<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
+        unsafe { &mut *self.buf }
     }
 }
 
@@ -341,6 +343,36 @@ mod tests {
         let buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
         assert!(buffer.is_empty());
         drop(buffer);
+
+        unsafe { buf_ring.release(&io_uring).unwrap() }
+    }
+
+    #[test]
+    fn read_with_multi_borrowed_buf() {
+        let mut io_uring = IoUring::new(1024).unwrap();
+        let buf_ring = IoUringBufRing::new(&io_uring, 2, 1, 4).unwrap();
+
+        let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            stream.write_all(b"test").unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+
+        let buffer1 = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        assert_eq!(buffer1.as_ref(), b"te");
+
+        let buffer2 = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        assert_eq!(buffer2.as_ref(), b"st");
+        drop(buffer2);
+
+        let eof_buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        assert!(eof_buffer.is_empty());
+        drop(eof_buffer);
+
+        drop(buffer1);
 
         unsafe { buf_ring.release(&io_uring).unwrap() }
     }
