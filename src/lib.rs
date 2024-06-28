@@ -1,4 +1,4 @@
-use std::cell::{RefCell, UnsafeCell};
+use std::cell::UnsafeCell;
 use std::io::ErrorKind;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::{Deref, DerefMut};
@@ -84,7 +84,7 @@ impl Drop for BufRingMmap {
 ///
 /// register buffer ring for io-uring provided buffers
 pub struct IoUringBufRing {
-    buf_ring_mmap: ManuallyDrop<RefCell<BufRingMmap>>,
+    buf_ring_mmap: ManuallyDrop<UnsafeCell<BufRingMmap>>,
     bufs: ManuallyDrop<UnsafeCell<Vec<Vec<u8>>>>,
     buf_group: u16,
 }
@@ -131,7 +131,7 @@ impl IoUringBufRing {
 
         let buf_ring_mmap = Self::create_buf_ring(ring, ring_entries as _, buf_group)?;
         let mut this = Self {
-            buf_ring_mmap: ManuallyDrop::new(RefCell::new(buf_ring_mmap)),
+            buf_ring_mmap: ManuallyDrop::new(UnsafeCell::new(buf_ring_mmap)),
             bufs: ManuallyDrop::new(UnsafeCell::new(bufs)),
             buf_group,
         };
@@ -174,7 +174,7 @@ impl IoUringBufRing {
 
     fn init_bufs_with_iter(&mut self) {
         let mask = self.mask();
-        let mut mmap = self.buf_ring_mmap.borrow_mut();
+        let mmap = self.buf_ring_mmap.get_mut();
         let bufs = self.bufs.get_mut();
         for (id, buf) in bufs.iter_mut().enumerate() {
             // Safety: all arguments are valid
@@ -196,13 +196,12 @@ impl IoUringBufRing {
 
     /// # Safety
     ///
-    /// caller must make sure release valid buffer
+    /// * Caller must make sure release valid buffer
+    /// * Callers should be on the same thread.
     unsafe fn release_borrowed_buffer(&self, buf: &mut [MaybeUninit<u8>], bid: u16) {
-        self.buf_ring_mmap
-            .borrow_mut()
-            .add_buffer(buf, bid, self.mask(), 0);
-
-        self.buf_ring_mmap.borrow_mut().advance_buffers(1);
+        let mmap = &mut *self.buf_ring_mmap.get();
+        mmap.add_buffer(buf, bid, self.mask(), 0);
+        mmap.advance_buffers(1);
     }
 
     fn create_buf_ring<S, C>(
