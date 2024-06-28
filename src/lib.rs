@@ -1,21 +1,17 @@
 use std::cell::UnsafeCell;
 use std::ffi::c_int;
 use std::io::ErrorKind;
-use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::ptr::{addr_of_mut, NonNull};
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::{io, ptr};
 
+use io_uring::types::BufRingEntry;
 use io_uring::{cqueue, squeue, IoUring};
 use rustix::mm::{mmap_anonymous, munmap, MapFlags, ProtFlags};
 
-use crate::raw_types::{io_uring_buf, io_uring_buf_ring};
-
-mod raw_types;
-
 struct BufRingMmap {
-    ptr: NonNull<io_uring_buf_ring>,
+    ptr: NonNull<BufRingEntry>,
     size: usize,
 }
 
@@ -39,7 +35,7 @@ impl BufRingMmap {
         })
     }
 
-    fn as_ptr(&self) -> *mut io_uring_buf_ring {
+    fn as_ptr(&self) -> *mut BufRingEntry {
         self.ptr.as_ptr()
     }
 }
@@ -58,8 +54,6 @@ pub struct IoUringBufRing {
     buf_ring_mmap: BufRingMmap,
     bufs: UnsafeCell<Vec<Vec<u8>>>,
     bgid: u16,
-
-    _marker: PhantomData<io_uring_buf_ring>,
 }
 
 impl IoUringBufRing {
@@ -83,7 +77,6 @@ impl IoUringBufRing {
             // create empty bufs first, init in init_bufs method
             bufs: UnsafeCell::new(Vec::with_capacity(ring_entries as _)),
             bgid,
-            _marker: Default::default(),
         };
 
         this.init_bufs(buf_size, ring_entries);
@@ -165,7 +158,7 @@ impl IoUringBufRing {
         S: squeue::EntryMarker,
         C: cqueue::EntryMarker,
     {
-        let ring_size = ring_entries as usize * size_of::<io_uring_buf>();
+        let ring_size = ring_entries as usize * size_of::<BufRingEntry>();
         let buf_ring_mmap = BufRingMmap::new(ring_size)?;
 
         unsafe {
@@ -173,12 +166,8 @@ impl IoUringBufRing {
             ring.submitter()
                 .register_buf_ring(buf_ring_mmap.as_ptr() as _, ring_entries, bgid)?;
 
-            // Safety: buf_ring_ptr is valid
-            (*buf_ring_mmap.as_ptr())
-                .__bindgen_anon_1
-                .__bindgen_anon_1
-                .as_mut()
-                .tail = 0;
+            // Safety: no one write the tail at this moment
+            *(BufRingEntry::tail(buf_ring_mmap.as_ptr()) as *mut u16) = 0;
         }
 
         Ok(buf_ring_mmap)
@@ -198,16 +187,11 @@ impl IoUringBufRing {
         let tail = self.get_atomic_tail();
         let index = ((tail.load(Ordering::Acquire) as c_int + buf_offset) & mask) as _;
 
-        let ptr = (*self.buf_ring_mmap.as_ptr())
-            .__bindgen_anon_1
-            .bufs
-            .as_mut()
-            .as_mut_ptr()
-            .offset(index);
+        let buf_ring_entry = self.buf_ring_mmap.as_ptr().offset(index);
 
-        (*ptr).addr = buf as *mut u8 as _;
-        (*ptr).len = capacity as _;
-        (*ptr).bid = bid;
+        (*buf_ring_entry).set_addr(buf as *mut u8 as _);
+        (*buf_ring_entry).set_len(capacity as _);
+        (*buf_ring_entry).set_bid(bid);
     }
 
     fn advance_buffers(&self, count: u16) {
@@ -215,14 +199,8 @@ impl IoUringBufRing {
     }
 
     fn get_atomic_tail(&self) -> &AtomicU16 {
-        // Safety: no one read/write tail ptr without atomic operation
-        unsafe {
-            let buf_ring = &mut *self.buf_ring_mmap.as_ptr();
-
-            AtomicU16::from_ptr(addr_of_mut!(
-                buf_ring.__bindgen_anon_1.__bindgen_anon_1.as_mut().tail
-            ))
-        }
+        // Safety: no one read/write tail ptr without atomic operation after init
+        unsafe { AtomicU16::from_ptr(BufRingEntry::tail(self.buf_ring_mmap.as_ptr()) as _) }
     }
 }
 
