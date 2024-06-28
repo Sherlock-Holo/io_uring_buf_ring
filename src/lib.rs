@@ -98,6 +98,10 @@ impl IoUringBufRing {
             ));
         }
 
+        if buffers.len() == 0 {
+            return Err(io::Error::new(ErrorKind::InvalidInput, "empty buffers"));
+        }
+
         let buf_ring_mmap = Self::create_buf_ring(ring, ring_entries as _, buf_group)?;
         let mut this = Self {
             buf_ring_mmap,
