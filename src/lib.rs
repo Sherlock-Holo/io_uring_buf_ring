@@ -165,7 +165,7 @@ impl IoUringBufRing {
             buffer.buf.capacity(),
             buffer.id,
             self.mask(),
-            buffer.id as _,
+            0,
         );
 
         self.advance_buffers(1);
