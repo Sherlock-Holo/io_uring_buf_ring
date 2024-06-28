@@ -101,11 +101,9 @@ impl IoUringBufRing {
         buf.set_len(available_len);
 
         Some(BorrowedBuffer {
-            buf: buf.as_mut() as _,
-            capacity: buf.capacity(),
+            buf,
             id,
             buf_ring: self,
-            _marker: Default::default(),
         })
     }
 
@@ -148,8 +146,8 @@ impl IoUringBufRing {
     /// caller must make sure release valid buffer
     unsafe fn release_borrowed_buffer(&self, buffer: &mut BorrowedBuffer) {
         self.add_buffer(
-            buffer.buf,
-            buffer.capacity,
+            buffer.buf.as_mut(),
+            buffer.buf.capacity(),
             buffer.id,
             (*self.bufs.get()).len() as c_int - 1,
             buffer.id as _,
@@ -230,26 +228,22 @@ impl IoUringBufRing {
 
 /// Borrowed buffer from [`IoUringBufRing`]
 pub struct BorrowedBuffer<'a> {
-    buf: *mut [u8],
-    capacity: usize,
+    buf: &'a mut Vec<u8>,
     id: u16,
-
     buf_ring: &'a IoUringBufRing,
-
-    _marker: PhantomData<&'a mut [u8]>,
 }
 
 impl Deref for BorrowedBuffer<'_> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.buf }
+        self.buf
     }
 }
 
 impl DerefMut for BorrowedBuffer<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.buf }
+        self.buf
     }
 }
 
