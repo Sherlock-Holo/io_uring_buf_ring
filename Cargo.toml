@@ -1,0 +1,8 @@
+[package]
+name = "io_uring_buf_ring"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+io-uring = "0.6.4"
+rustix = { version = "0.38.34", features = ["mm"] }
