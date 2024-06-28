@@ -128,7 +128,7 @@ impl IoUringBufRing {
 
             // Safety: all arguments are valid
             unsafe {
-                self.io_uring_buf_ring_add(
+                self.add_buffer(
                     buf.as_mut(),
                     buf.capacity(),
                     id as _,
@@ -140,14 +140,14 @@ impl IoUringBufRing {
             self.bufs.get_mut().push(buf);
         }
 
-        self.io_uring_buf_ring_advance(ring_entries as _);
+        self.advance_buffers(ring_entries as _);
     }
 
     /// # Safety
     ///
     /// caller must make sure release valid buffer
     unsafe fn release_borrowed_buffer(&self, buffer: &mut BorrowedBuffer) {
-        self.io_uring_buf_ring_add(
+        self.add_buffer(
             buffer.buf,
             buffer.capacity,
             buffer.id,
@@ -155,7 +155,7 @@ impl IoUringBufRing {
             buffer.id as _,
         );
 
-        self.io_uring_buf_ring_advance(1);
+        self.advance_buffers(1);
     }
 
     fn create_buf_ring<S, C>(
@@ -189,7 +189,7 @@ impl IoUringBufRing {
     /// # Safety:
     ///
     /// caller must make sure all arguments are valid
-    unsafe fn io_uring_buf_ring_add(
+    unsafe fn add_buffer(
         &self,
         buf: *mut [u8],
         capacity: usize,
@@ -197,13 +197,10 @@ impl IoUringBufRing {
         mask: c_int,
         buf_offset: c_int,
     ) {
-        let buf_ring = &mut *self.buf_ring_mmap.as_ptr();
-
-        let tail = AtomicU16::from_ptr(addr_of_mut!(
-            buf_ring.__bindgen_anon_1.__bindgen_anon_1.as_mut().tail
-        ));
+        let tail = self.get_atomic_tail();
         let index = ((tail.load(Ordering::Acquire) as c_int + buf_offset) & mask) as _;
-        let ptr = buf_ring
+
+        let ptr = (*self.buf_ring_mmap.as_ptr())
             .__bindgen_anon_1
             .bufs
             .as_mut()
@@ -215,15 +212,18 @@ impl IoUringBufRing {
         (*ptr).bid = bid;
     }
 
-    fn io_uring_buf_ring_advance(&self, count: u16) {
-        // Safety: buf_ring_ptr is valid and no one read/write tail ptr without atomic operation
+    fn advance_buffers(&self, count: u16) {
+        self.get_atomic_tail().fetch_add(count, Ordering::Release);
+    }
+
+    fn get_atomic_tail(&self) -> &AtomicU16 {
+        // Safety: no one read/write tail ptr without atomic operation
         unsafe {
             let buf_ring = &mut *self.buf_ring_mmap.as_ptr();
 
-            let tail = AtomicU16::from_ptr(addr_of_mut!(
+            AtomicU16::from_ptr(addr_of_mut!(
                 buf_ring.__bindgen_anon_1.__bindgen_anon_1.as_mut().tail
-            ));
-            tail.fetch_add(count, Ordering::Release);
+            ))
         }
     }
 }
