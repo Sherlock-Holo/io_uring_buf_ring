@@ -142,7 +142,7 @@ impl IoUringBufRing {
             buffer.buf.as_mut(),
             buffer.buf.capacity(),
             buffer.id,
-            (*self.bufs.get()).len() as c_int - 1,
+            self.mask(),
             buffer.id as _,
         );
 
@@ -201,6 +201,11 @@ impl IoUringBufRing {
     fn get_atomic_tail(&self) -> &AtomicU16 {
         // Safety: no one read/write tail ptr without atomic operation after init
         unsafe { AtomicU16::from_ptr(BufRingEntry::tail(self.buf_ring_mmap.as_ptr()).cast_mut()) }
+    }
+
+    fn mask(&self) -> c_int {
+        // Safety: we just get the bufs len to calculate the mask
+        unsafe { (*self.bufs.get()).len() as c_int - 1 }
     }
 }
 
