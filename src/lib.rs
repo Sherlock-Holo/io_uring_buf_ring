@@ -346,15 +346,11 @@ mod tests {
 
         let stream = TcpStream::connect(addr).unwrap();
 
-        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
-        assert_eq!(buffer.as_ref(), b"te");
+        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        assert_eq!(buffer.as_ref(), b"test");
         drop(buffer);
 
-        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
-        assert_eq!(buffer.as_ref(), b"st");
-        drop(buffer);
-
-        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
+        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
         assert!(buffer.is_empty());
         drop(buffer);
 
@@ -364,7 +360,7 @@ mod tests {
     #[test]
     fn read_with_multi_borrowed_buf() {
         let mut io_uring = IoUring::new(1024).unwrap();
-        let buf_ring = IoUringBufRing::new(&io_uring, 2, 1, 4).unwrap();
+        let buf_ring = IoUringBufRing::new(&io_uring, 2, 1, 2).unwrap();
 
         let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
         let addr = listener.local_addr().unwrap();
@@ -375,14 +371,14 @@ mod tests {
 
         let stream = TcpStream::connect(addr).unwrap();
 
-        let buffer1 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
+        let buffer1 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
         assert_eq!(buffer1.as_ref(), b"te");
 
-        let buffer2 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
+        let buffer2 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
         assert_eq!(buffer2.as_ref(), b"st");
         drop(buffer2);
 
-        let eof_buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
+        let eof_buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
         assert!(eof_buffer.is_empty());
         drop(eof_buffer);
 
@@ -445,7 +441,7 @@ mod tests {
 
         let mut stream = TcpStream::connect(addr).unwrap();
 
-        let mut buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 4).unwrap();
+        let mut buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
         assert_eq!(buffer.as_ref(), b"test");
 
         buffer[0] = b'a';
