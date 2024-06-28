@@ -252,7 +252,7 @@ unsafe fn io_uring_buf_ring_add(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::{Read as _, Write};
     use std::net::{Ipv6Addr, TcpListener, TcpStream};
     use std::os::fd::AsRawFd;
     use std::thread;
@@ -278,6 +278,36 @@ mod tests {
         unsafe { buf_ring.release(&io_uring).unwrap() }
     }
 
+    fn read_tcp<'a>(
+        ring: &mut IoUring,
+        buf_ring: &'a IoUringBufRing,
+        stream: &TcpStream,
+        len: usize,
+    ) -> io::Result<BorrowedBuffer<'a>> {
+        let sqe = Read::new(Fd(stream.as_raw_fd()), ptr::null_mut(), len as _)
+            .offset(0)
+            .buf_group(1)
+            .build()
+            .flags(Flags::BUFFER_SELECT);
+
+        unsafe {
+            ring.submission().push(&sqe).unwrap();
+        }
+
+        ring.submit_and_wait(1)?;
+
+        let cqe = ring.completion().next().unwrap();
+        let res = cqe.result();
+        if res < 0 {
+            return Err(io::Error::from_raw_os_error(-res));
+        }
+
+        let bid = buffer_select(cqe.flags()).unwrap();
+        let buffer = unsafe { buf_ring.get_buf(bid, res as _) }.unwrap();
+
+        Ok(buffer)
+    }
+
     #[test]
     fn read() {
         let mut io_uring = IoUring::new(1024).unwrap();
@@ -292,33 +322,49 @@ mod tests {
 
         let stream = TcpStream::connect(addr).unwrap();
 
-        loop {
-            let sqe = Read::new(Fd(stream.as_raw_fd()), ptr::null_mut(), 2)
-                .offset(0)
-                .buf_group(1)
-                .build()
-                .flags(Flags::BUFFER_SELECT);
+        let buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        assert_eq!(buffer.as_ref(), b"te");
+        drop(buffer);
 
-            unsafe {
-                io_uring.submission().push(&sqe).unwrap();
-            }
+        let buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        assert_eq!(buffer.as_ref(), b"st");
+        drop(buffer);
 
-            io_uring.submit_and_wait(1).unwrap();
-
-            let cqe = io_uring.completion().next().unwrap();
-            let res = cqe.result();
-            if res < 0 {
-                panic!("{}", io::Error::from_raw_os_error(-res));
-            }
-            if res == 0 {
-                break;
-            }
-
-            let bid = buffer_select(cqe.flags()).unwrap();
-            let buffer = unsafe { buf_ring.get_buf(bid, res as _) }.unwrap();
-            println!("{}", String::from_utf8_lossy(&buffer));
-        }
+        let buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        assert!(buffer.is_empty());
+        drop(buffer);
 
         unsafe { buf_ring.release(&io_uring).unwrap() }
+    }
+
+    #[test]
+    fn read_then_write() {
+        let mut io_uring = IoUring::new(1024).unwrap();
+        let buf_ring = IoUringBufRing::new(&io_uring, 1, 1, 4).unwrap();
+
+        let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join_handle = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            stream.write_all(b"test").unwrap();
+
+            let mut buf = [0; 4];
+            stream.read_exact(&mut buf).unwrap();
+
+            assert_eq!(buf.as_ref(), b"aest");
+        });
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+
+        let mut buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 4).unwrap();
+        assert_eq!(buffer.as_ref(), b"test");
+
+        buffer[0] = b'a';
+        stream.write_all(&buffer).unwrap();
+        drop(buffer);
+
+        unsafe { buf_ring.release(&io_uring).unwrap() }
+
+        join_handle.join().unwrap();
     }
 }
