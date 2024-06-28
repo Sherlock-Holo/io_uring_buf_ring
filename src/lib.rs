@@ -43,7 +43,7 @@ impl BufRingMmap {
 impl Drop for BufRingMmap {
     fn drop(&mut self) {
         // Safety: we own the buf_ring
-        let _ = unsafe { munmap(self.ptr.as_ptr() as _, self.size) };
+        let _ = unsafe { munmap(self.ptr.as_ptr().cast(), self.size) };
     }
 }
 
@@ -167,7 +167,7 @@ impl IoUringBufRing {
                 .register_buf_ring(buf_ring_mmap.as_ptr() as _, ring_entries, bgid)?;
 
             // Safety: no one write the tail at this moment
-            *(BufRingEntry::tail(buf_ring_mmap.as_ptr()) as *mut u16) = 0;
+            *(BufRingEntry::tail(buf_ring_mmap.as_ptr()).cast_mut()) = 0;
         }
 
         Ok(buf_ring_mmap)
@@ -200,7 +200,7 @@ impl IoUringBufRing {
 
     fn get_atomic_tail(&self) -> &AtomicU16 {
         // Safety: no one read/write tail ptr without atomic operation after init
-        unsafe { AtomicU16::from_ptr(BufRingEntry::tail(self.buf_ring_mmap.as_ptr()) as _) }
+        unsafe { AtomicU16::from_ptr(BufRingEntry::tail(self.buf_ring_mmap.as_ptr()).cast_mut()) }
     }
 }
 
