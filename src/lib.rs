@@ -53,16 +53,16 @@ impl Drop for BufRingMmap {
 pub struct IoUringBufRing {
     buf_ring_mmap: BufRingMmap,
     bufs: UnsafeCell<Vec<Vec<u8>>>,
-    bgid: u16,
+    buf_group: u16,
 }
 
 impl IoUringBufRing {
-    /// Create new [`IoUringBufRing`] with given `bgid`, buffer size is `buf_size`, the buffer ring
-    /// entry size will be `ring_entries.next_power_of_two()`
+    /// Create new [`IoUringBufRing`] with given `buf_group`, buffer size is `buf_size`, the buffer
+    /// ring entry size will be `ring_entries.next_power_of_two()`
     pub fn new<S, C>(
         ring: &IoUring<S, C>,
         mut ring_entries: u16,
-        bgid: u16,
+        buf_group: u16,
         buf_size: usize,
     ) -> io::Result<Self>
     where
@@ -70,16 +70,39 @@ impl IoUringBufRing {
         C: cqueue::EntryMarker,
     {
         ring_entries = ring_entries.next_power_of_two();
-        let buf_ring_mmap = Self::create_buf_ring(ring, ring_entries, bgid)?;
+        let bufs = (0..ring_entries).map(|_| Vec::with_capacity(buf_size));
 
+        Self::new_with_buffers(ring, bufs, buf_group)
+    }
+
+    /// Create new [`IoUringBufRing`] with given `buf_group` and custom buffers, the buf sizes in
+    /// buffers can be different
+    ///
+    /// # Panic
+    ///
+    /// if `buffers.len()` is not power of **2**, will panic
+    pub fn new_with_buffers<S, C, B>(
+        ring: &IoUring<S, C>,
+        buffers: B,
+        buf_group: u16,
+    ) -> io::Result<Self>
+    where
+        S: squeue::EntryMarker,
+        C: cqueue::EntryMarker,
+        B: ExactSizeIterator<Item = Vec<u8>>,
+    {
+        let ring_entries = buffers.len();
+        assert!(ring_entries.is_power_of_two());
+
+        let buf_ring_mmap = Self::create_buf_ring(ring, ring_entries as _, buf_group)?;
         let mut this = Self {
             buf_ring_mmap,
             // create empty bufs first, init in init_bufs method
-            bufs: UnsafeCell::new(Vec::with_capacity(ring_entries as _)),
-            bgid,
+            bufs: UnsafeCell::new(Vec::with_capacity(ring_entries)),
+            buf_group,
         };
 
-        this.init_bufs(buf_size, ring_entries);
+        this.init_bufs_with_iter(buffers);
 
         Ok(this)
     }
@@ -108,15 +131,14 @@ impl IoUringBufRing {
         S: squeue::EntryMarker,
         C: cqueue::EntryMarker,
     {
-        ring.submitter().unregister_buf_ring(self.bgid)?;
+        ring.submitter().unregister_buf_ring(self.buf_group)?;
 
         Ok(())
     }
 
-    fn init_bufs(&mut self, buf_size: usize, ring_entries: u16) {
-        for id in 0..ring_entries {
-            let mut buf = Vec::with_capacity(buf_size);
-
+    fn init_bufs_with_iter<B: ExactSizeIterator<Item = Vec<u8>>>(&mut self, bufs: B) {
+        let ring_entries = bufs.len();
+        for (id, mut buf) in bufs.enumerate() {
             // Safety: all arguments are valid
             unsafe {
                 self.add_buffer(
@@ -152,7 +174,7 @@ impl IoUringBufRing {
     fn create_buf_ring<S, C>(
         ring: &IoUring<S, C>,
         ring_entries: u16,
-        bgid: u16,
+        buf_group: u16,
     ) -> io::Result<BufRingMmap>
     where
         S: squeue::EntryMarker,
@@ -163,8 +185,11 @@ impl IoUringBufRing {
 
         unsafe {
             // Safety: ring_entries are valid
-            ring.submitter()
-                .register_buf_ring(buf_ring_mmap.as_ptr() as _, ring_entries, bgid)?;
+            ring.submitter().register_buf_ring(
+                buf_ring_mmap.as_ptr() as _,
+                ring_entries,
+                buf_group,
+            )?;
 
             // Safety: no one write the tail at this moment
             *(BufRingEntry::tail(buf_ring_mmap.as_ptr()).cast_mut()) = 0;
@@ -254,13 +279,20 @@ mod tests {
     #[test]
     fn create_buf_ring() {
         let io_uring = IoUring::new(1024).unwrap();
-        IoUringBufRing::new(&io_uring, 1, 1, 4).unwrap();
+        let buf_ring = IoUringBufRing::new(&io_uring, 1, 1, 4).unwrap();
+
+        unsafe { buf_ring.release(&io_uring).unwrap() }
     }
 
     #[test]
-    fn create_and_release_buf_ring() {
+    fn create_with_custom_buffers_buf_ring() {
         let io_uring = IoUring::new(1024).unwrap();
-        let buf_ring = IoUringBufRing::new(&io_uring, 1, 1, 4).unwrap();
+        let buf_ring = IoUringBufRing::new_with_buffers(
+            &io_uring,
+            [Vec::with_capacity(1), Vec::with_capacity(2)].into_iter(),
+            1,
+        )
+        .unwrap();
 
         unsafe { buf_ring.release(&io_uring).unwrap() }
     }
@@ -268,14 +300,19 @@ mod tests {
     fn read_tcp<'a>(
         ring: &mut IoUring,
         buf_ring: &'a IoUringBufRing,
+        buf_group: u16,
         stream: &TcpStream,
-        len: usize,
+        len: impl Into<Option<usize>>,
     ) -> io::Result<BorrowedBuffer<'a>> {
-        let sqe = Read::new(Fd(stream.as_raw_fd()), ptr::null_mut(), len as _)
-            .offset(0)
-            .buf_group(1)
-            .build()
-            .flags(Flags::BUFFER_SELECT);
+        let sqe = Read::new(
+            Fd(stream.as_raw_fd()),
+            ptr::null_mut(),
+            len.into().unwrap_or(0) as _,
+        )
+        .offset(0)
+        .buf_group(buf_group)
+        .build()
+        .flags(Flags::BUFFER_SELECT);
 
         unsafe {
             ring.submission().push(&sqe).unwrap();
@@ -309,15 +346,15 @@ mod tests {
 
         let stream = TcpStream::connect(addr).unwrap();
 
-        let buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
         assert_eq!(buffer.as_ref(), b"te");
         drop(buffer);
 
-        let buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
         assert_eq!(buffer.as_ref(), b"st");
         drop(buffer);
 
-        let buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
         assert!(buffer.is_empty());
         drop(buffer);
 
@@ -338,18 +375,53 @@ mod tests {
 
         let stream = TcpStream::connect(addr).unwrap();
 
-        let buffer1 = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        let buffer1 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
         assert_eq!(buffer1.as_ref(), b"te");
 
-        let buffer2 = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        let buffer2 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
         assert_eq!(buffer2.as_ref(), b"st");
         drop(buffer2);
 
-        let eof_buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 2).unwrap();
+        let eof_buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 2).unwrap();
         assert!(eof_buffer.is_empty());
         drop(eof_buffer);
 
         drop(buffer1);
+
+        unsafe { buf_ring.release(&io_uring).unwrap() }
+    }
+
+    #[test]
+    fn custom_bufs_read_with_multi_borrowed_buf() {
+        let mut io_uring = IoUring::new(1024).unwrap();
+        let buf_ring = IoUringBufRing::new_with_buffers(
+            &io_uring,
+            [Vec::with_capacity(2), Vec::with_capacity(4)].into_iter(),
+            1,
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            stream.write_all(b"test").unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+
+        let buffer1 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        assert_eq!(buffer1.as_ref(), b"te");
+
+        let buffer2 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        assert_eq!(buffer2.as_ref(), b"st");
+
+        drop(buffer1);
+
+        let eof_buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        assert!(eof_buffer.is_empty());
+        drop(eof_buffer);
+        drop(buffer2);
 
         unsafe { buf_ring.release(&io_uring).unwrap() }
     }
@@ -373,7 +445,7 @@ mod tests {
 
         let mut stream = TcpStream::connect(addr).unwrap();
 
-        let mut buffer = read_tcp(&mut io_uring, &buf_ring, &stream, 4).unwrap();
+        let mut buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 4).unwrap();
         assert_eq!(buffer.as_ref(), b"test");
 
         buffer[0] = b'a';
