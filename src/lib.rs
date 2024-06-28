@@ -1,6 +1,6 @@
 use std::cell::{RefCell, UnsafeCell};
 use std::io::ErrorKind;
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -84,8 +84,8 @@ impl Drop for BufRingMmap {
 ///
 /// register buffer ring for io-uring provided buffers
 pub struct IoUringBufRing {
-    buf_ring_mmap: RefCell<BufRingMmap>,
-    bufs: UnsafeCell<Vec<Vec<u8>>>,
+    buf_ring_mmap: ManuallyDrop<RefCell<BufRingMmap>>,
+    bufs: ManuallyDrop<UnsafeCell<Vec<Vec<u8>>>>,
     buf_group: u16,
 }
 
@@ -131,8 +131,8 @@ impl IoUringBufRing {
 
         let buf_ring_mmap = Self::create_buf_ring(ring, ring_entries as _, buf_group)?;
         let mut this = Self {
-            buf_ring_mmap: RefCell::new(buf_ring_mmap),
-            bufs: UnsafeCell::new(bufs),
+            buf_ring_mmap: ManuallyDrop::new(RefCell::new(buf_ring_mmap)),
+            bufs: ManuallyDrop::new(UnsafeCell::new(bufs)),
             buf_group,
         };
 
@@ -160,13 +160,15 @@ impl IoUringBufRing {
     /// # Safety
     ///
     /// caller must make sure release [`IoUringBufRing`] with correct `ring`
-    pub unsafe fn release<S, C>(self, ring: &IoUring<S, C>) -> io::Result<()>
+    pub unsafe fn release<S, C>(mut self, ring: &IoUring<S, C>) -> io::Result<()>
     where
         S: squeue::EntryMarker,
         C: cqueue::EntryMarker,
     {
         ring.submitter().unregister_buf_ring(self.buf_group)?;
 
+        ManuallyDrop::drop(&mut self.buf_ring_mmap);
+        ManuallyDrop::drop(&mut self.bufs);
         Ok(())
     }
 
