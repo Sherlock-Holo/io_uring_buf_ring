@@ -1,5 +1,4 @@
 use std::cell::UnsafeCell;
-use std::ffi::c_int;
 use std::io::ErrorKind;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
@@ -211,11 +210,11 @@ impl IoUringBufRing {
         buf: *mut [u8],
         capacity: usize,
         bid: u16,
-        mask: c_int,
-        buf_offset: c_int,
+        mask: u16,
+        buf_offset: u16,
     ) {
-        let tail = self.get_atomic_tail();
-        let index = ((tail.load(Ordering::Acquire) as c_int + buf_offset) & mask) as _;
+        let tail = self.atomic_tail();
+        let index = ((tail.load(Ordering::Acquire) + buf_offset) & mask) as _;
 
         let buf_ring_entry = self.buf_ring_mmap.as_ptr().offset(index);
 
@@ -225,17 +224,17 @@ impl IoUringBufRing {
     }
 
     fn advance_buffers(&self, count: u16) {
-        self.get_atomic_tail().fetch_add(count, Ordering::Release);
+        self.atomic_tail().fetch_add(count, Ordering::Release);
     }
 
-    fn get_atomic_tail(&self) -> &AtomicU16 {
+    fn atomic_tail(&self) -> &AtomicU16 {
         // Safety: no one read/write tail ptr without atomic operation after init
         unsafe { AtomicU16::from_ptr(BufRingEntry::tail(self.buf_ring_mmap.as_ptr()).cast_mut()) }
     }
 
-    fn mask(&self) -> c_int {
+    fn mask(&self) -> u16 {
         // Safety: we just get the bufs len to calculate the mask
-        unsafe { (*self.bufs.get()).len() as c_int - 1 }
+        unsafe { (*self.bufs.get()).len() as u16 - 1 }
     }
 }
 
