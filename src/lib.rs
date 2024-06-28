@@ -78,9 +78,9 @@ impl IoUringBufRing {
     /// Create new [`IoUringBufRing`] with given `buf_group` and custom buffers, the buf sizes in
     /// buffers can be different
     ///
-    /// # Panic
+    /// # Note
     ///
-    /// if `buffers.len()` is not power of **2**, will panic
+    /// if `buffers.len()` should be power of **2**, otherwise will return error
     pub fn new_with_buffers<S, C, B>(
         ring: &IoUring<S, C>,
         buffers: B,
@@ -92,7 +92,12 @@ impl IoUringBufRing {
         B: ExactSizeIterator<Item = Vec<u8>>,
     {
         let ring_entries = buffers.len();
-        assert!(ring_entries.is_power_of_two());
+        if !ring_entries.is_power_of_two() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "buffers len is not power of 2",
+            ));
+        }
 
         let buf_ring_mmap = Self::create_buf_ring(ring, ring_entries as _, buf_group)?;
         let mut this = Self {
