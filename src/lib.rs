@@ -39,11 +39,6 @@ impl BufRingMmap {
         })
     }
 
-    fn as_mut(&mut self) -> &mut io_uring_buf_ring {
-        // Safety: ptr is init
-        unsafe { self.ptr.as_mut() }
-    }
-
     fn as_ptr(&self) -> *mut io_uring_buf_ring {
         self.ptr.as_ptr()
     }
@@ -54,47 +49,6 @@ impl Drop for BufRingMmap {
         // Safety: we own the buf_ring
         let _ = unsafe { munmap(self.ptr.as_ptr() as _, self.size) };
     }
-}
-
-fn br_setup<S, C>(ring: &IoUring<S, C>, ring_entries: u16, bgid: u16) -> io::Result<BufRingMmap>
-where
-    S: squeue::EntryMarker,
-    C: cqueue::EntryMarker,
-{
-    let ring_size = ring_entries as usize * size_of::<io_uring_buf>();
-
-    unsafe {
-        let buf_ring_mmap = BufRingMmap::new(ring_size)?;
-
-        // Safety: ring_entries are valid
-        ring.submitter()
-            .register_buf_ring(buf_ring_mmap.as_ptr() as _, ring_entries, bgid)?;
-
-        Ok(buf_ring_mmap)
-    }
-}
-
-fn io_uring_setup_buf_ring<S, C>(
-    ring: &IoUring<S, C>,
-    ring_entries: u16,
-    bgid: u16,
-) -> io::Result<BufRingMmap>
-where
-    S: squeue::EntryMarker,
-    C: cqueue::EntryMarker,
-{
-    let buf_ring_mmap = br_setup(ring, ring_entries, bgid)?;
-
-    unsafe {
-        // Safety: buf_ring_ptr is valid
-        (*buf_ring_mmap.as_ptr())
-            .__bindgen_anon_1
-            .__bindgen_anon_1
-            .as_mut()
-            .tail = 0;
-    }
-
-    Ok(buf_ring_mmap)
 }
 
 /// Buffer ring
@@ -122,31 +76,19 @@ impl IoUringBufRing {
         C: cqueue::EntryMarker,
     {
         ring_entries = ring_entries.next_power_of_two();
-        let mut buf_ring_mmap = io_uring_setup_buf_ring(ring, ring_entries, bgid)?;
-        let mut bufs = vec![Vec::with_capacity(buf_size); ring_entries as _];
+        let buf_ring_mmap = Self::create_buf_ring(ring, ring_entries, bgid)?;
 
-        for (id, buf) in bufs.iter_mut().enumerate() {
-            // Safety: all arguments are valid
-            unsafe {
-                io_uring_buf_ring_add(
-                    buf_ring_mmap.as_mut(),
-                    buf.as_mut_ptr(),
-                    buf.capacity(),
-                    id as _,
-                    (ring_entries - 1) as _,
-                    id as _,
-                );
-            }
-        }
-
-        io_uring_buf_ring_advance(buf_ring_mmap.as_mut(), ring_entries);
-
-        Ok(Self {
+        let mut this = Self {
             buf_ring_mmap,
-            bufs: UnsafeCell::new(bufs),
+            // create empty bufs first, init in init_bufs method
+            bufs: UnsafeCell::new(Vec::with_capacity(ring_entries as _)),
             bgid,
             _marker: Default::default(),
-        })
+        };
+
+        this.init_bufs(buf_size, ring_entries);
+
+        Ok(this)
     }
 
     /// # Safety
@@ -177,6 +119,111 @@ impl IoUringBufRing {
 
         Ok(())
     }
+
+    fn init_bufs(&mut self, buf_size: usize, ring_entries: u16) {
+        for id in 0..ring_entries {
+            let mut buf = Vec::with_capacity(buf_size);
+
+            // Safety: all arguments are valid
+            unsafe {
+                self.io_uring_buf_ring_add(
+                    buf.as_mut_ptr(),
+                    buf.capacity(),
+                    id as _,
+                    (ring_entries - 1) as _,
+                    id as _,
+                );
+            }
+
+            self.bufs.get_mut().push(buf);
+        }
+
+        self.io_uring_buf_ring_advance(ring_entries as _);
+    }
+
+    /// # Safety
+    ///
+    /// caller must make sure release valid buffer
+    unsafe fn release_borrowed_buffer(&self, buffer: &mut BorrowedBuffer) {
+        self.io_uring_buf_ring_add(
+            buffer.ptr,
+            buffer.len,
+            buffer.id,
+            (*self.bufs.get()).len() as c_int - 1,
+            buffer.id as _,
+        );
+
+        self.io_uring_buf_ring_advance(1);
+    }
+
+    fn create_buf_ring<S, C>(
+        ring: &IoUring<S, C>,
+        ring_entries: u16,
+        bgid: u16,
+    ) -> io::Result<BufRingMmap>
+    where
+        S: squeue::EntryMarker,
+        C: cqueue::EntryMarker,
+    {
+        let ring_size = ring_entries as usize * size_of::<io_uring_buf>();
+        let buf_ring_mmap = BufRingMmap::new(ring_size)?;
+
+        unsafe {
+            // Safety: ring_entries are valid
+            ring.submitter()
+                .register_buf_ring(buf_ring_mmap.as_ptr() as _, ring_entries, bgid)?;
+
+            // Safety: buf_ring_ptr is valid
+            (*buf_ring_mmap.as_ptr())
+                .__bindgen_anon_1
+                .__bindgen_anon_1
+                .as_mut()
+                .tail = 0;
+        }
+
+        Ok(buf_ring_mmap)
+    }
+
+    /// # Safety:
+    ///
+    /// caller must make sure all arguments are valid
+    unsafe fn io_uring_buf_ring_add(
+        &self,
+        buf_addr: *mut u8,
+        buf_len: usize,
+        bid: u16,
+        mask: c_int,
+        buf_offset: c_int,
+    ) {
+        let buf_ring = &mut *self.buf_ring_mmap.as_ptr();
+
+        let tail = AtomicU16::from_ptr(addr_of_mut!(
+            buf_ring.__bindgen_anon_1.__bindgen_anon_1.as_mut().tail
+        ));
+        let index = ((tail.load(Ordering::Acquire) as c_int + buf_offset) & mask) as _;
+        let ptr = buf_ring
+            .__bindgen_anon_1
+            .bufs
+            .as_mut()
+            .as_mut_ptr()
+            .offset(index);
+
+        (*ptr).addr = buf_addr as _;
+        (*ptr).len = buf_len as _;
+        (*ptr).bid = bid;
+    }
+
+    fn io_uring_buf_ring_advance(&self, count: u16) {
+        // Safety: buf_ring_ptr is valid and no one read/write tail ptr without atomic operation
+        unsafe {
+            let buf_ring = &mut *self.buf_ring_mmap.as_ptr();
+
+            let tail = AtomicU16::from_ptr(addr_of_mut!(
+                buf_ring.__bindgen_anon_1.__bindgen_anon_1.as_mut().tail
+            ));
+            tail.fetch_add(count, Ordering::Release);
+        }
+    }
 }
 
 /// Borrowed buffer from [`IoUringBufRing`]
@@ -206,58 +253,9 @@ impl DerefMut for BorrowedBuffer<'_> {
 
 impl Drop for BorrowedBuffer<'_> {
     fn drop(&mut self) {
-        unsafe {
-            let buf_ring = &mut *self.buf_ring.buf_ring_mmap.as_ptr();
-
-            io_uring_buf_ring_add(
-                buf_ring,
-                self.ptr,
-                self.len,
-                self.id,
-                (*self.buf_ring.bufs.get()).len() as c_int - 1,
-                self.id as _,
-            );
-
-            io_uring_buf_ring_advance(buf_ring, 1);
-        }
+        // Safety: release to the correct buffer ring
+        unsafe { self.buf_ring.release_borrowed_buffer(self) }
     }
-}
-
-fn io_uring_buf_ring_advance(buf_ring_ptr: &mut io_uring_buf_ring, count: u16) {
-    // Safety: buf_ring_ptr is valid and no one read/write tail ptr without atomic operation
-    unsafe {
-        let tail = AtomicU16::from_ptr(addr_of_mut!(
-            buf_ring_ptr.__bindgen_anon_1.__bindgen_anon_1.as_mut().tail
-        ));
-        tail.fetch_add(count, Ordering::Release);
-    }
-}
-
-/// # Safety:
-///
-/// caller must make sure all arguments are valid
-unsafe fn io_uring_buf_ring_add(
-    buf_ring_ptr: &mut io_uring_buf_ring,
-    buf_addr: *mut u8,
-    buf_len: usize,
-    bid: u16,
-    mask: c_int,
-    buf_offset: c_int,
-) {
-    let tail = AtomicU16::from_ptr(addr_of_mut!(
-        buf_ring_ptr.__bindgen_anon_1.__bindgen_anon_1.as_mut().tail
-    ));
-    let index = ((tail.load(Ordering::Acquire) as c_int + buf_offset) & mask) as _;
-    let ptr = buf_ring_ptr
-        .__bindgen_anon_1
-        .bufs
-        .as_mut()
-        .as_mut_ptr()
-        .offset(index);
-
-    (*ptr).addr = buf_addr as _;
-    (*ptr).len = buf_len as _;
-    (*ptr).bid = bid;
 }
 
 #[cfg(test)]
