@@ -1,5 +1,6 @@
 use std::cell::UnsafeCell;
 use std::io::ErrorKind;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -11,13 +12,15 @@ use rustix::mm::{mmap_anonymous, munmap, MapFlags, ProtFlags};
 
 struct BufRingMmap {
     ptr: NonNull<BufRingEntry>,
+    len: usize,
     size: usize,
 }
 
 impl BufRingMmap {
-    fn new(size: usize) -> io::Result<Self> {
+    fn new(len: usize) -> io::Result<Self> {
+        let size = len * std::mem::size_of::<BufRingEntry>();
+        // SAFETY: correctly aligned.
         let ptr = unsafe {
-            // Safety: we will check the ptr
             mmap_anonymous(
                 ptr::null_mut(),
                 size,
@@ -25,17 +28,53 @@ impl BufRingMmap {
                 MapFlags::PRIVATE,
             )
         }?;
-        let ptr = NonNull::new(ptr)
-            .ok_or_else(|| io::Error::new(ErrorKind::Other, "mmap return null ptr"))?;
+        // SAFETY: rustix checkes the pointer.
+        let ptr = unsafe { NonNull::new_unchecked(ptr.cast()) };
 
-        Ok(Self {
-            ptr: ptr.cast(),
-            size,
-        })
+        Ok(Self { ptr, len, size })
     }
 
-    fn as_ptr(&self) -> *mut BufRingEntry {
-        self.ptr.as_ptr()
+    /// The length of entries allocated.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    fn as_slice_uninit_mut(&mut self) -> &mut [MaybeUninit<BufRingEntry>] {
+        // SAFETY: the pointer is valid
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().cast(), self.len) }
+    }
+
+    fn atomic_tail(&self) -> &AtomicU16 {
+        // Safety: no one read/write tail ptr without atomic operation after init
+        unsafe { AtomicU16::from_ptr(BufRingEntry::tail(self.ptr.as_ptr()).cast_mut()) }
+    }
+
+    /// # Safety
+    ///
+    /// Caller must ensure the ring is not full.
+    unsafe fn add_buffer(
+        &mut self,
+        buf: &mut [MaybeUninit<u8>],
+        bid: u16,
+        mask: u16,
+        buf_offset: usize,
+    ) {
+        let tail = self.atomic_tail();
+        let index = ((tail.load(Ordering::Acquire) + (buf_offset as u16)) & mask) as usize;
+
+        // SAFETY: only write plain data here
+        let buf_ring_entry = (&mut self.as_slice_uninit_mut()[index]).assume_init_mut();
+
+        buf_ring_entry.set_addr(buf.as_ptr() as _);
+        buf_ring_entry.set_len(buf.len() as _);
+        buf_ring_entry.set_bid(bid);
+    }
+
+    /// # Safety
+    ///
+    /// The advanced count should be equal to the added count.
+    unsafe fn advance_buffers(&self, count: u16) {
+        self.atomic_tail().fetch_add(count, Ordering::Release);
     }
 }
 
@@ -50,8 +89,8 @@ impl Drop for BufRingMmap {
 ///
 /// register buffer ring for io-uring provided buffers
 pub struct IoUringBufRing {
-    buf_ring_mmap: BufRingMmap,
-    bufs: UnsafeCell<Vec<Vec<u8>>>,
+    buf_ring_mmap: ManuallyDrop<UnsafeCell<BufRingMmap>>,
+    bufs: ManuallyDrop<UnsafeCell<Vec<Vec<u8>>>>,
     buf_group: u16,
 }
 
@@ -60,7 +99,7 @@ impl IoUringBufRing {
     /// ring entry size will be `ring_entries.next_power_of_two()`
     pub fn new<S, C>(
         ring: &IoUring<S, C>,
-        mut ring_entries: u16,
+        ring_entries: u16,
         buf_group: u16,
         buf_size: usize,
     ) -> io::Result<Self>
@@ -68,18 +107,18 @@ impl IoUringBufRing {
         S: squeue::EntryMarker,
         C: cqueue::EntryMarker,
     {
-        ring_entries = ring_entries.next_power_of_two();
         let bufs = (0..ring_entries).map(|_| Vec::with_capacity(buf_size));
 
         Self::new_with_buffers(ring, bufs, buf_group)
     }
 
     /// Create new [`IoUringBufRing`] with given `buf_group` and custom buffers, the buf sizes in
-    /// buffers can be different
+    /// buffers can be different.
     ///
     /// # Note
     ///
-    /// if `buffers.len()` should be power of **2**, otherwise will return error
+    /// if `buffers.len()` should be power of **2**, otherwise the entries will be extended.
+    /// Users can call [`IoUringBufRing::add`] to fill the spare space with new buffers.
     pub fn new_with_buffers<S, C, B>(
         ring: &IoUring<S, C>,
         buffers: B,
@@ -88,29 +127,22 @@ impl IoUringBufRing {
     where
         S: squeue::EntryMarker,
         C: cqueue::EntryMarker,
-        B: ExactSizeIterator<Item = Vec<u8>>,
+        B: Iterator<Item = Vec<u8>>,
     {
-        let ring_entries = buffers.len();
-        if !ring_entries.is_power_of_two() {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "buffers len is not power of 2",
-            ));
-        }
-
-        if buffers.len() == 0 {
+        let bufs = buffers.collect::<Vec<_>>();
+        if bufs.len() == 0 {
             return Err(io::Error::new(ErrorKind::InvalidInput, "empty buffers"));
         }
+        let ring_entries = bufs.len().next_power_of_two();
 
         let buf_ring_mmap = Self::create_buf_ring(ring, ring_entries as _, buf_group)?;
         let mut this = Self {
-            buf_ring_mmap,
-            // create empty bufs first, init in init_bufs method
-            bufs: UnsafeCell::new(Vec::with_capacity(ring_entries)),
+            buf_ring_mmap: ManuallyDrop::new(UnsafeCell::new(buf_ring_mmap)),
+            bufs: ManuallyDrop::new(UnsafeCell::new(bufs)),
             buf_group,
         };
 
-        this.init_bufs_with_iter(buffers);
+        this.init_bufs_with_iter();
 
         Ok(this)
     }
@@ -134,49 +166,47 @@ impl IoUringBufRing {
     /// # Safety
     ///
     /// caller must make sure release [`IoUringBufRing`] with correct `ring`
-    pub unsafe fn release<S, C>(self, ring: &IoUring<S, C>) -> io::Result<()>
+    pub unsafe fn release<S, C>(mut self, ring: &IoUring<S, C>) -> io::Result<()>
     where
         S: squeue::EntryMarker,
         C: cqueue::EntryMarker,
     {
         ring.submitter().unregister_buf_ring(self.buf_group)?;
 
+        ManuallyDrop::drop(&mut self.buf_ring_mmap);
+        ManuallyDrop::drop(&mut self.bufs);
         Ok(())
     }
 
-    fn init_bufs_with_iter<B: ExactSizeIterator<Item = Vec<u8>>>(&mut self, bufs: B) {
-        let ring_entries = bufs.len();
-        for (id, mut buf) in bufs.enumerate() {
+    fn init_bufs_with_iter(&mut self) {
+        let mask = self.mask();
+        let mmap = self.buf_ring_mmap.get_mut();
+        let bufs = self.bufs.get_mut();
+        for (id, buf) in bufs.iter_mut().enumerate() {
             // Safety: all arguments are valid
             unsafe {
-                self.add_buffer(
-                    buf.as_mut(),
-                    buf.capacity(),
+                mmap.add_buffer(
+                    // The buffers are created with `with_capacity`.
+                    buf.spare_capacity_mut(),
                     id as _,
-                    (ring_entries - 1) as _,
-                    id as _,
+                    mask,
+                    id,
                 );
             }
-
-            self.bufs.get_mut().push(buf);
         }
 
-        self.advance_buffers(ring_entries as _);
+        unsafe {
+            mmap.advance_buffers(bufs.len() as _);
+        }
     }
 
     /// # Safety
     ///
-    /// caller must make sure release valid buffer
-    unsafe fn release_borrowed_buffer(&self, buffer: &mut BorrowedBuffer) {
-        self.add_buffer(
-            buffer.buf.as_mut(),
-            buffer.buf.capacity(),
-            buffer.id,
-            self.mask(),
-            0,
-        );
-
-        self.advance_buffers(1);
+    /// * Caller must make sure release valid buffer
+    unsafe fn release_borrowed_buffer(&self, buf: &mut [MaybeUninit<u8>], bid: u16) {
+        let mmap = &mut *self.buf_ring_mmap.get();
+        mmap.add_buffer(buf, bid, self.mask(), 0);
+        mmap.advance_buffers(1);
     }
 
     fn create_buf_ring<S, C>(
@@ -188,57 +218,56 @@ impl IoUringBufRing {
         S: squeue::EntryMarker,
         C: cqueue::EntryMarker,
     {
-        let ring_size = ring_entries as usize * size_of::<BufRingEntry>();
-        let buf_ring_mmap = BufRingMmap::new(ring_size)?;
+        let mut buf_ring_mmap = BufRingMmap::new(ring_entries as _)?;
 
+        let slice = buf_ring_mmap.as_slice_uninit_mut();
         unsafe {
             // Safety: ring_entries are valid
-            ring.submitter().register_buf_ring(
-                buf_ring_mmap.as_ptr() as _,
-                ring_entries,
-                buf_group,
-            )?;
+            ring.submitter()
+                .register_buf_ring(slice.as_ptr() as _, slice.len() as _, buf_group)?;
 
             // Safety: no one write the tail at this moment
-            *(BufRingEntry::tail(buf_ring_mmap.as_ptr()).cast_mut()) = 0;
+            *(BufRingEntry::tail(slice.as_ptr().cast()).cast_mut()) = 0;
         }
 
         Ok(buf_ring_mmap)
     }
 
-    /// # Safety:
-    ///
-    /// caller must make sure all arguments are valid
-    unsafe fn add_buffer(
-        &self,
-        buf: *mut [u8],
-        capacity: usize,
-        bid: u16,
-        mask: u16,
-        buf_offset: u16,
-    ) {
-        let tail = self.atomic_tail();
-        let index = ((tail.load(Ordering::Acquire) + buf_offset) & mask) as _;
-
-        let buf_ring_entry = self.buf_ring_mmap.as_ptr().offset(index);
-
-        (*buf_ring_entry).set_addr(buf as *mut u8 as _);
-        (*buf_ring_entry).set_len(capacity as _);
-        (*buf_ring_entry).set_bid(bid);
-    }
-
-    fn advance_buffers(&self, count: u16) {
-        self.atomic_tail().fetch_add(count, Ordering::Release);
-    }
-
-    fn atomic_tail(&self) -> &AtomicU16 {
-        // Safety: no one read/write tail ptr without atomic operation after init
-        unsafe { AtomicU16::from_ptr(BufRingEntry::tail(self.buf_ring_mmap.as_ptr()).cast_mut()) }
-    }
-
     fn mask(&self) -> u16 {
         // Safety: we just get the bufs len to calculate the mask
-        unsafe { (*self.bufs.get()).len() as u16 - 1 }
+        unsafe { (&*self.buf_ring_mmap.get()).len() as u16 - 1 }
+    }
+
+    /// Add a new buffer to the ring.
+    ///
+    /// # Safety
+    ///
+    /// Caller should ensure that the ring is not full.
+    pub unsafe fn add_unchecked(&mut self, buf: impl Into<Vec<u8>>) -> u16 {
+        let mask = self.mask();
+        let bufs = self.bufs.get_mut();
+        let bufs_len = bufs.len();
+        let bid = bufs_len as _;
+        let mut buf = buf.into();
+        let buf_slice = std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len());
+        bufs.push(buf.into());
+        let mmap = self.buf_ring_mmap.get_mut();
+        mmap.add_buffer(buf_slice, bid, mask, 0);
+        mmap.advance_buffers(1);
+        bid
+    }
+
+    /// Add a new buffer to the ring, and return error if the ring is full.
+    pub fn add(&mut self, buf: impl Into<Vec<u8>>) -> io::Result<u16> {
+        let bufs_len = self.bufs.get_mut().len();
+        let entries_len = self.buf_ring_mmap.get_mut().len();
+        if bufs_len >= entries_len {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "no spare space for new buffer",
+            ));
+        }
+        Ok(unsafe { self.add_unchecked(buf) })
     }
 }
 
@@ -266,7 +295,12 @@ impl DerefMut for BorrowedBuffer<'_> {
 impl Drop for BorrowedBuffer<'_> {
     fn drop(&mut self) {
         // Safety: release to the correct buffer ring
-        unsafe { self.buf_ring.release_borrowed_buffer(self) }
+        unsafe {
+            self.buf_ring.release_borrowed_buffer(
+                std::slice::from_raw_parts_mut(self.buf.as_mut_ptr().cast(), self.buf.len()),
+                self.id,
+            )
+        }
     }
 }
 
@@ -301,6 +335,15 @@ mod tests {
             1,
         )
         .unwrap();
+
+        unsafe { buf_ring.release(&io_uring).unwrap() }
+    }
+
+    #[test]
+    fn create_and_add_more_buffer() {
+        let io_uring = IoUring::new(1024).unwrap();
+        let mut buf_ring = IoUringBufRing::new(&io_uring, 3, 1, 2).unwrap();
+        buf_ring.add([0u8; 4]).unwrap();
 
         unsafe { buf_ring.release(&io_uring).unwrap() }
     }
