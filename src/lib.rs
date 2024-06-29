@@ -113,11 +113,12 @@ impl IoUringBufRing {
     }
 
     /// Create new [`IoUringBufRing`] with given `buf_group` and custom buffers, the buf sizes in
-    /// buffers can be different
+    /// buffers can be different.
     ///
     /// # Note
     ///
-    /// if `buffers.len()` should be power of **2**, otherwise will return error
+    /// if `buffers.len()` should be power of **2**, otherwise the entries will be extended.
+    /// Users can call [`IoUringBufRing::add`] to fill the spare space with new buffers.
     pub fn new_with_buffers<S, C, B>(
         ring: &IoUring<S, C>,
         buffers: B,
@@ -236,6 +237,38 @@ impl IoUringBufRing {
         // Safety: we just get the bufs len to calculate the mask
         unsafe { (&*self.buf_ring_mmap.get()).len() as u16 - 1 }
     }
+
+    /// Add a new buffer to the ring.
+    ///
+    /// # Safety
+    ///
+    /// Caller should ensure that the ring is not full.
+    pub unsafe fn add_unchecked(&mut self, buf: impl Into<Vec<u8>>) -> u16 {
+        let mask = self.mask();
+        let bufs = self.bufs.get_mut();
+        let bufs_len = bufs.len();
+        let bid = bufs_len as _;
+        let mut buf = buf.into();
+        let buf_slice = std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len());
+        bufs.push(buf.into());
+        let mmap = self.buf_ring_mmap.get_mut();
+        mmap.add_buffer(buf_slice, bid, mask, 0);
+        mmap.advance_buffers(1);
+        bid
+    }
+
+    /// Add a new buffer to the ring, and return error if the ring is full.
+    pub fn add(&mut self, buf: impl Into<Vec<u8>>) -> io::Result<u16> {
+        let bufs_len = self.bufs.get_mut().len();
+        let entries_len = self.buf_ring_mmap.get_mut().len();
+        if bufs_len >= entries_len {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "no spare space for new buffer",
+            ));
+        }
+        Ok(unsafe { self.add_unchecked(buf) })
+    }
 }
 
 /// Borrowed buffer from [`IoUringBufRing`]
@@ -302,6 +335,15 @@ mod tests {
             1,
         )
         .unwrap();
+
+        unsafe { buf_ring.release(&io_uring).unwrap() }
+    }
+
+    #[test]
+    fn create_and_add_more_buffer() {
+        let io_uring = IoUring::new(1024).unwrap();
+        let mut buf_ring = IoUringBufRing::new(&io_uring, 3, 1, 2).unwrap();
+        buf_ring.add([0u8; 4]).unwrap();
 
         unsafe { buf_ring.release(&io_uring).unwrap() }
     }
