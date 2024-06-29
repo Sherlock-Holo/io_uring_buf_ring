@@ -34,6 +34,11 @@ impl BufRingMmap {
         Ok(Self { ptr, len, size })
     }
 
+    /// The length of entries allocated.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
     fn as_slice_uninit_mut(&mut self) -> &mut [MaybeUninit<BufRingEntry>] {
         // SAFETY: the pointer is valid
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().cast(), self.len) }
@@ -197,7 +202,6 @@ impl IoUringBufRing {
     /// # Safety
     ///
     /// * Caller must make sure release valid buffer
-    /// * Callers should be on the same thread.
     unsafe fn release_borrowed_buffer(&self, buf: &mut [MaybeUninit<u8>], bid: u16) {
         let mmap = &mut *self.buf_ring_mmap.get();
         mmap.add_buffer(buf, bid, self.mask(), 0);
@@ -230,7 +234,7 @@ impl IoUringBufRing {
 
     fn mask(&self) -> u16 {
         // Safety: we just get the bufs len to calculate the mask
-        unsafe { (*self.bufs.get()).len().next_power_of_two() as u16 - 1 }
+        unsafe { (&*self.buf_ring_mmap.get()).len() as u16 - 1 }
     }
 }
 
