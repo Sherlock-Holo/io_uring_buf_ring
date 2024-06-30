@@ -16,7 +16,7 @@ use io_uring::squeue::Flags;
 use io_uring::types::Fd;
 use io_uring_buf_ring::{BorrowedBuffer, Buffer, IoUringBufRing};
 
-fn main() {
+fn example() {
     let mut io_uring = IoUring::new(1024).unwrap();
     let buf_ring = IoUringBufRing::new(&io_uring, 1, 1, 4).unwrap();
 
