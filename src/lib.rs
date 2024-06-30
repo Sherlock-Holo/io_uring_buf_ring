@@ -283,7 +283,7 @@ impl<B: Buffer> IoUringBufRing<B> {
     ///
     /// # Notes
     ///
-    /// If unregister failed, the inner buffer ring and buffers won't be dropped to avoid dangling
+    /// If unregister failed, the inner buffer ring and buffers won't be dropped to avoid dangling.
     ///
     /// # Safety
     ///
@@ -298,6 +298,20 @@ impl<B: Buffer> IoUringBufRing<B> {
         ManuallyDrop::drop(&mut self.buf_ring_mmap);
         ManuallyDrop::drop(&mut self.bufs);
         Ok(())
+    }
+
+    /// Release the buffer ring without unregister it from [`IoUring`]
+    ///
+    /// This is useful when [`IoUring`] is dropped before release the buffer ring, to avoid memory
+    /// leak.
+    ///
+    /// # Safety
+    ///
+    /// Caller must make sure the buffer group id is unregistered from [`IoUring`], or the
+    /// [`IoUring`] is dropped.
+    pub unsafe fn drop(mut buf_ring: Self) {
+        ManuallyDrop::drop(&mut buf_ring.buf_ring_mmap);
+        ManuallyDrop::drop(&mut buf_ring.bufs);
     }
 
     fn init_bufs_with_iter(&mut self) {
@@ -451,6 +465,16 @@ mod tests {
         let buf_ring = IoUringBufRing::new(&io_uring, 1, 1, 4).unwrap();
 
         unsafe { buf_ring.release(&io_uring).unwrap() }
+    }
+
+    #[test]
+    fn manually_drop() {
+        let io_uring = IoUring::new(1024).unwrap();
+        let buf_ring = IoUringBufRing::new(&io_uring, 1, 1, 4).unwrap();
+
+        drop(io_uring);
+
+        unsafe { IoUringBufRing::drop(buf_ring) }
     }
 
     #[test]
