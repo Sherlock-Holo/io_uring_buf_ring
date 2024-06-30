@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
 use std::io::ErrorKind;
-use std::mem::{ManuallyDrop, MaybeUninit};
+use std::mem::{size_of, ManuallyDrop, MaybeUninit};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU16, Ordering};
