@@ -1,78 +1,4 @@
-//! # io_uring_buf_ring
-//!
-//! Helper user create an io-uring buffer-ring, user no need to care manage the underlying ring
-//!
-//! ## Example
-//!
-//! ```rust
-//! use std::io::Write;
-//! use std::net::{Ipv6Addr, TcpListener, TcpStream};
-//! use std::{io, ptr, thread};
-//! use std::os::fd::AsRawFd;
-//! use io_uring::cqueue::buffer_select;
-//! use io_uring::IoUring;
-//! use io_uring::opcode::Read;
-//! use io_uring::squeue::Flags;
-//! use io_uring::types::Fd;
-//! use io_uring_buf_ring::{BorrowedBuffer, Buffer, IoUringBufRing};
-//!
-//! let mut io_uring = IoUring::new(1024).unwrap();
-//! let buf_ring = IoUringBufRing::new(&io_uring, 1, 1, 4).unwrap();
-//!
-//! let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
-//! let addr = listener.local_addr().unwrap();
-//! thread::spawn(move || {
-//!     let mut stream = listener.accept().unwrap().0;
-//!     stream.write_all(b"test").unwrap();
-//! });
-//!
-//! let stream = TcpStream::connect(addr).unwrap();
-//!
-//! let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
-//! assert_eq!(buffer.as_ref(), b"test");
-//! drop(buffer);
-//!
-//! let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
-//! assert!(buffer.is_empty());
-//! drop(buffer);
-//!
-//! unsafe { buf_ring.release(&io_uring).unwrap() }
-//!
-//! fn read_tcp<'a, B: Buffer>(
-//!     ring: &mut IoUring,
-//!     buf_ring: &'a IoUringBufRing<B>,
-//!     buf_group: u16,
-//!     stream: &TcpStream,
-//!     len: impl Into<Option<usize>>,
-//! ) -> io::Result<BorrowedBuffer<'a, B>> {
-//!     let sqe = Read::new(
-//!         Fd(stream.as_raw_fd()),
-//!         ptr::null_mut(),
-//!         len.into().unwrap_or(0) as _,
-//!     )
-//!     .offset(0)
-//!     .buf_group(buf_group)
-//!     .build()
-//!     .flags(Flags::BUFFER_SELECT);
-//!
-//!     unsafe {
-//!         ring.submission().push(&sqe).unwrap();
-//!     }
-//!
-//!     ring.submit_and_wait(1)?;
-//!
-//!     let cqe = ring.completion().next().unwrap();
-//!     let res = cqe.result();
-//!     if res < 0 {
-//!         return Err(io::Error::from_raw_os_error(-res));
-//!     }
-//!
-//!     let bid = buffer_select(cqe.flags()).unwrap();
-//!     let buffer = unsafe { buf_ring.get_buf(bid, res as _) }.unwrap();
-//!
-//!     Ok(buffer)
-//! }
-//! ```
+#![doc = include_str!("../README.md")]
 
 use std::cell::UnsafeCell;
 use std::io::ErrorKind;
@@ -166,24 +92,28 @@ impl Drop for BufRingMmap {
     }
 }
 
+/// Buffer trait.
+///
+/// User can implement this trait to provide custom buffer.
+///
 /// # Safety
 ///
-/// Implementor must make sure all methods implement are safe
+/// Implementor must make sure all methods implement are safe.
 #[allow(clippy::len_without_is_empty)]
 pub unsafe trait Buffer {
-    /// Return the buffer pointer
+    /// Return the buffer pointer.
     fn ptr(&self) -> *mut MaybeUninit<u8>;
 
-    /// Return the buffer length
+    /// Return the buffer length.
     fn len(&self) -> usize;
 
-    /// Drop the buffer
+    /// Drop the buffer.
     fn drop(self);
 }
 
 /// # Safety
 ///
-/// The implement is safe
+/// The implement is safe.
 unsafe impl Buffer for Vec<u8> {
     fn ptr(&self) -> *mut MaybeUninit<u8> {
         self.as_ptr().cast_mut().cast()
@@ -200,7 +130,7 @@ unsafe impl Buffer for Vec<u8> {
 
 /// # Safety
 ///
-/// The implement is safe
+/// The implement is safe.
 unsafe impl<'a> Buffer for &'a mut [u8] {
     fn ptr(&self) -> *mut MaybeUninit<u8> {
         self.as_ptr().cast_mut().cast()
@@ -240,15 +170,10 @@ unsafe impl Buffer for BytesMut {
     }
 }
 
-pub trait BufferExt: Buffer {
-    fn as_uninit_slice(&self) -> &[MaybeUninit<u8>] {
-        // Safety: ptr and len are valid
-        unsafe { slice::from_raw_parts(self.ptr(), self.len()) }
-    }
-
+trait BufferExt: Buffer {
     /// # Safety
     ///
-    /// len data must be initialize
+    /// len data must be initialize.
     unsafe fn as_slice(&self, len: usize) -> &[u8] {
         debug_assert!(len <= self.len());
         slice::from_raw_parts(self.ptr().cast(), len)
@@ -261,7 +186,7 @@ pub trait BufferExt: Buffer {
 
     /// # Safety
     ///
-    /// len data must be initialize
+    /// len data must be initialize.
     unsafe fn as_slice_mut(&mut self, len: usize) -> &mut [u8] {
         debug_assert!(len <= self.len());
         slice::from_raw_parts_mut(self.ptr().cast(), len)
@@ -270,9 +195,9 @@ pub trait BufferExt: Buffer {
 
 impl<T: Buffer> BufferExt for T {}
 
-/// Buffer ring
+/// Buffer ring.
 ///
-/// register buffer ring for io-uring provided buffers
+/// register buffer ring for io-uring provided buffers.
 pub struct IoUringBufRing<B: Buffer> {
     buf_ring_mmap: ManuallyDrop<UnsafeCell<BufRingMmap>>,
     bufs: ManuallyDrop<UnsafeCell<Vec<B>>>,
@@ -281,7 +206,7 @@ pub struct IoUringBufRing<B: Buffer> {
 
 impl IoUringBufRing<Vec<u8>> {
     /// Create new [`IoUringBufRing`] with given `buf_group`, buffer size is `buf_size`, the buffer
-    /// ring entry size will be `ring_entries.next_power_of_two()`
+    /// ring entry size will be `ring_entries.next_power_of_two()`.
     pub fn new<S, C>(
         ring: &IoUring<S, C>,
         ring_entries: u16,
@@ -336,8 +261,7 @@ impl<B: Buffer> IoUringBufRing<B> {
 
     /// # Safety
     ///
-    /// caller must make sure there is only one [`BorrowedBuffer`] with the `id` at the same
-    /// time
+    /// caller must make sure there is only one [`BorrowedBuffer`] with the `id` at the same time.
     pub unsafe fn get_buf(&self, id: u16, available_len: usize) -> Option<BorrowedBuffer<B>> {
         let buf = (*self.bufs.get()).get_mut(id as usize)?;
         debug_assert!(available_len <= buf.len());
@@ -352,7 +276,7 @@ impl<B: Buffer> IoUringBufRing<B> {
 
     /// # Safety
     ///
-    /// caller must make sure release [`IoUringBufRing`] with correct `ring`
+    /// caller must make sure release [`IoUringBufRing`] with correct `ring`.
     pub unsafe fn release<S, C>(mut self, ring: &IoUring<S, C>) -> io::Result<()>
     where
         S: squeue::EntryMarker,
@@ -389,7 +313,7 @@ impl<B: Buffer> IoUringBufRing<B> {
 
     /// # Safety
     ///
-    /// * Caller must make sure release valid buffer
+    /// * Caller must make sure release valid buffer.
     unsafe fn release_borrowed_buffer(&self, buf: &mut [MaybeUninit<u8>], bid: u16) {
         let mmap = &mut *self.buf_ring_mmap.get();
         mmap.add_buffer(buf, bid, self.mask(), 0);
@@ -460,7 +384,9 @@ impl<B: Buffer> IoUringBufRing<B> {
     }
 }
 
-/// Borrowed buffer from [`IoUringBufRing`]
+/// Borrowed buffer from [`IoUringBufRing`].
+///
+/// User can use it to access the filled data through Kernel.
 pub struct BorrowedBuffer<'a, B: Buffer> {
     buf: &'a mut B,
     len: usize,
