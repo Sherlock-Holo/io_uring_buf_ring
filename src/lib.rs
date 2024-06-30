@@ -82,6 +82,8 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::{io, ptr, slice};
 
+#[cfg(feature = "bytes")]
+use bytes::BytesMut;
 use io_uring::types::BufRingEntry;
 use io_uring::{cqueue, squeue, IoUring};
 use rustix::mm::{mmap_anonymous, munmap, MapFlags, ProtFlags};
@@ -196,6 +198,9 @@ unsafe impl Buffer for Vec<u8> {
     }
 }
 
+/// # Safety
+///
+/// The implement is safe
 unsafe impl<'a> Buffer for &'a mut [u8] {
     fn ptr(&self) -> *mut MaybeUninit<u8> {
         self.as_ptr().cast_mut().cast()
@@ -218,6 +223,21 @@ unsafe impl<'a, const N: usize> Buffer for &'a mut [u8; N] {
     }
 
     fn drop(self) {}
+}
+
+#[cfg(feature = "bytes")]
+unsafe impl Buffer for BytesMut {
+    fn ptr(&self) -> *mut MaybeUninit<u8> {
+        self.as_ptr().cast_mut().cast()
+    }
+
+    fn len(&self) -> usize {
+        self.capacity()
+    }
+
+    fn drop(self) {
+        drop(self);
+    }
 }
 
 pub trait BufferExt: Buffer {
