@@ -166,12 +166,7 @@ unsafe impl Buffer for BytesMut {
     }
 }
 
-pub trait BufferExt: Buffer {
-    fn as_uninit_slice(&self) -> &[MaybeUninit<u8>] {
-        // Safety: ptr and len are valid
-        unsafe { slice::from_raw_parts(self.ptr(), self.len()) }
-    }
-
+trait BufferExt: Buffer {
     /// # Safety
     ///
     /// len data must be initialize
