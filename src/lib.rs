@@ -92,6 +92,9 @@ struct BufRingMmap {
     size: usize,
 }
 
+// Safety: it can send to other thread
+unsafe impl Send for BufRingMmap {}
+
 impl BufRingMmap {
     fn new(len: usize) -> io::Result<Self> {
         let size = len * size_of::<BufRingEntry>();
