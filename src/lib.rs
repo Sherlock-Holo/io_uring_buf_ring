@@ -168,7 +168,7 @@ impl Drop for BufRingMmap {
 ///
 /// Implementor must make sure all methods implement are safe
 #[allow(clippy::len_without_is_empty)]
-pub unsafe trait Buffer: 'static {
+pub unsafe trait Buffer {
     /// Return the buffer pointer
     fn ptr(&self) -> *mut MaybeUninit<u8>;
 
@@ -194,6 +194,30 @@ unsafe impl Buffer for Vec<u8> {
     fn drop(self) {
         drop(self)
     }
+}
+
+unsafe impl<'a> Buffer for &'a mut [u8] {
+    fn ptr(&self) -> *mut MaybeUninit<u8> {
+        self.as_ptr().cast_mut().cast()
+    }
+
+    fn len(&self) -> usize {
+        <[u8]>::len(self)
+    }
+
+    fn drop(self) {}
+}
+
+unsafe impl<'a, const N: usize> Buffer for &'a mut [u8; N] {
+    fn ptr(&self) -> *mut MaybeUninit<u8> {
+        self.as_ptr().cast_mut().cast()
+    }
+
+    fn len(&self) -> usize {
+        self.as_ref().len()
+    }
+
+    fn drop(self) {}
 }
 
 pub trait BufferExt: Buffer {
@@ -270,9 +294,9 @@ impl<B: Buffer> IoUringBufRing<B> {
     where
         S: squeue::EntryMarker,
         C: cqueue::EntryMarker,
-        Buffers: Iterator<Item = B>,
+        Buffers: IntoIterator<Item = B>,
     {
-        let bufs = buffers.collect::<Vec<_>>();
+        let bufs = buffers.into_iter().collect::<Vec<_>>();
         if bufs.is_empty() {
             return Err(io::Error::new(ErrorKind::InvalidInput, "empty buffers"));
         }
@@ -477,7 +501,7 @@ mod tests {
         let io_uring = IoUring::new(1024).unwrap();
         let buf_ring = IoUringBufRing::new_with_buffers(
             &io_uring,
-            [Vec::with_capacity(1), Vec::with_capacity(2)].into_iter(),
+            [Vec::with_capacity(1), Vec::with_capacity(2)],
             1,
         )
         .unwrap();
@@ -589,7 +613,7 @@ mod tests {
         let mut io_uring = IoUring::new(1024).unwrap();
         let buf_ring = IoUringBufRing::new_with_buffers(
             &io_uring,
-            [Vec::with_capacity(2), Vec::with_capacity(4)].into_iter(),
+            [Vec::with_capacity(2), Vec::with_capacity(4)],
             1,
         )
         .unwrap();
@@ -648,5 +672,31 @@ mod tests {
         unsafe { buf_ring.release(&io_uring).unwrap() }
 
         join_handle.join().unwrap();
+    }
+
+    #[test]
+    fn read_with_slice() {
+        let mut io_uring = IoUring::new(1024).unwrap();
+        let mut buf = [0; 4];
+        let buf_ring = IoUringBufRing::new_with_buffers(&io_uring, [&mut buf], 1).unwrap();
+
+        let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            stream.write_all(b"test").unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+
+        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        assert_eq!(buffer.as_ref(), b"test");
+        drop(buffer);
+
+        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        assert!(buffer.is_empty());
+        drop(buffer);
+
+        unsafe { buf_ring.release(&io_uring).unwrap() }
     }
 }
