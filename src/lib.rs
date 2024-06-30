@@ -229,7 +229,7 @@ impl<B: Buffer> IoUringBufRing<B> {
     ///
     /// # Note
     ///
-    /// if `buffers.len()` should be power of **2**, otherwise the entries will be extended.
+    /// If `buffers.len()` should be power of **2**, otherwise the entries will be extended.
     /// Users can call [`IoUringBufRing::add`] to fill the spare space with new buffers.
     pub fn new_with_buffers<S, C, Buffers>(
         ring: &IoUring<S, C>,
@@ -261,7 +261,7 @@ impl<B: Buffer> IoUringBufRing<B> {
 
     /// # Safety
     ///
-    /// caller must make sure there is only one [`BorrowedBuffer`] with the `id` at the same time.
+    /// Caller must make sure there is only one [`BorrowedBuffer`] with the `id` at the same time.
     pub unsafe fn get_buf(&self, id: u16, available_len: usize) -> Option<BorrowedBuffer<B>> {
         let buf = (*self.bufs.get()).get_mut(id as usize)?;
         debug_assert!(available_len <= buf.len());
@@ -274,9 +274,20 @@ impl<B: Buffer> IoUringBufRing<B> {
         })
     }
 
+    /// Get the buffer group id
+    pub fn buffer_group(&self) -> u16 {
+        self.buf_group
+    }
+
+    /// Release the buffer ring
+    ///
+    /// # Notes
+    ///
+    /// If unregister failed, the inner buffer ring and buffers won't be dropped to avoid dangling
+    ///
     /// # Safety
     ///
-    /// caller must make sure release [`IoUringBufRing`] with correct `ring`.
+    /// Caller must make sure release [`IoUringBufRing`] with correct `ring`.
     pub unsafe fn release<S, C>(mut self, ring: &IoUring<S, C>) -> io::Result<()>
     where
         S: squeue::EntryMarker,
@@ -513,11 +524,25 @@ mod tests {
 
         let stream = TcpStream::connect(addr).unwrap();
 
-        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let buffer = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert_eq!(buffer.as_ref(), b"test");
         drop(buffer);
 
-        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let buffer = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert!(buffer.is_empty());
         drop(buffer);
 
@@ -538,14 +563,35 @@ mod tests {
 
         let stream = TcpStream::connect(addr).unwrap();
 
-        let buffer1 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let buffer1 = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert_eq!(buffer1.as_ref(), b"te");
 
-        let buffer2 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let buffer2 = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert_eq!(buffer2.as_ref(), b"st");
         drop(buffer2);
 
-        let eof_buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let eof_buffer = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert!(eof_buffer.is_empty());
         drop(eof_buffer);
 
@@ -573,15 +619,36 @@ mod tests {
 
         let stream = TcpStream::connect(addr).unwrap();
 
-        let buffer1 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let buffer1 = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert_eq!(buffer1.as_ref(), b"te");
 
-        let buffer2 = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let buffer2 = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert_eq!(buffer2.as_ref(), b"st");
 
         drop(buffer1);
 
-        let eof_buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let eof_buffer = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert!(eof_buffer.is_empty());
         drop(eof_buffer);
         drop(buffer2);
@@ -608,7 +675,14 @@ mod tests {
 
         let mut stream = TcpStream::connect(addr).unwrap();
 
-        let mut buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let mut buffer = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert_eq!(buffer.as_ref(), b"test");
 
         buffer[0] = b'a';
@@ -635,11 +709,25 @@ mod tests {
 
         let stream = TcpStream::connect(addr).unwrap();
 
-        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let buffer = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert_eq!(buffer.as_ref(), b"test");
         drop(buffer);
 
-        let buffer = read_tcp(&mut io_uring, &buf_ring, 1, &stream, 0).unwrap();
+        let buffer = read_tcp(
+            &mut io_uring,
+            &buf_ring,
+            buf_ring.buffer_group(),
+            &stream,
+            0,
+        )
+        .unwrap();
         assert!(buffer.is_empty());
         drop(buffer);
 
