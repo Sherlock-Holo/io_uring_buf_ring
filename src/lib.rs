@@ -92,24 +92,28 @@ impl Drop for BufRingMmap {
     }
 }
 
+/// Buffer trait.
+///
+/// User can implement this trait to provide custom buffer.
+///
 /// # Safety
 ///
-/// Implementor must make sure all methods implement are safe
+/// Implementor must make sure all methods implement are safe.
 #[allow(clippy::len_without_is_empty)]
 pub unsafe trait Buffer {
-    /// Return the buffer pointer
+    /// Return the buffer pointer.
     fn ptr(&self) -> *mut MaybeUninit<u8>;
 
-    /// Return the buffer length
+    /// Return the buffer length.
     fn len(&self) -> usize;
 
-    /// Drop the buffer
+    /// Drop the buffer.
     fn drop(self);
 }
 
 /// # Safety
 ///
-/// The implement is safe
+/// The implement is safe.
 unsafe impl Buffer for Vec<u8> {
     fn ptr(&self) -> *mut MaybeUninit<u8> {
         self.as_ptr().cast_mut().cast()
@@ -126,7 +130,7 @@ unsafe impl Buffer for Vec<u8> {
 
 /// # Safety
 ///
-/// The implement is safe
+/// The implement is safe.
 unsafe impl<'a> Buffer for &'a mut [u8] {
     fn ptr(&self) -> *mut MaybeUninit<u8> {
         self.as_ptr().cast_mut().cast()
@@ -169,7 +173,7 @@ unsafe impl Buffer for BytesMut {
 trait BufferExt: Buffer {
     /// # Safety
     ///
-    /// len data must be initialize
+    /// len data must be initialize.
     unsafe fn as_slice(&self, len: usize) -> &[u8] {
         debug_assert!(len <= self.len());
         slice::from_raw_parts(self.ptr().cast(), len)
@@ -182,7 +186,7 @@ trait BufferExt: Buffer {
 
     /// # Safety
     ///
-    /// len data must be initialize
+    /// len data must be initialize.
     unsafe fn as_slice_mut(&mut self, len: usize) -> &mut [u8] {
         debug_assert!(len <= self.len());
         slice::from_raw_parts_mut(self.ptr().cast(), len)
@@ -191,9 +195,9 @@ trait BufferExt: Buffer {
 
 impl<T: Buffer> BufferExt for T {}
 
-/// Buffer ring
+/// Buffer ring.
 ///
-/// register buffer ring for io-uring provided buffers
+/// register buffer ring for io-uring provided buffers.
 pub struct IoUringBufRing<B: Buffer> {
     buf_ring_mmap: ManuallyDrop<UnsafeCell<BufRingMmap>>,
     bufs: ManuallyDrop<UnsafeCell<Vec<B>>>,
@@ -202,7 +206,7 @@ pub struct IoUringBufRing<B: Buffer> {
 
 impl IoUringBufRing<Vec<u8>> {
     /// Create new [`IoUringBufRing`] with given `buf_group`, buffer size is `buf_size`, the buffer
-    /// ring entry size will be `ring_entries.next_power_of_two()`
+    /// ring entry size will be `ring_entries.next_power_of_two()`.
     pub fn new<S, C>(
         ring: &IoUring<S, C>,
         ring_entries: u16,
@@ -257,8 +261,7 @@ impl<B: Buffer> IoUringBufRing<B> {
 
     /// # Safety
     ///
-    /// caller must make sure there is only one [`BorrowedBuffer`] with the `id` at the same
-    /// time
+    /// caller must make sure there is only one [`BorrowedBuffer`] with the `id` at the same time.
     pub unsafe fn get_buf(&self, id: u16, available_len: usize) -> Option<BorrowedBuffer<B>> {
         let buf = (*self.bufs.get()).get_mut(id as usize)?;
         debug_assert!(available_len <= buf.len());
@@ -273,7 +276,7 @@ impl<B: Buffer> IoUringBufRing<B> {
 
     /// # Safety
     ///
-    /// caller must make sure release [`IoUringBufRing`] with correct `ring`
+    /// caller must make sure release [`IoUringBufRing`] with correct `ring`.
     pub unsafe fn release<S, C>(mut self, ring: &IoUring<S, C>) -> io::Result<()>
     where
         S: squeue::EntryMarker,
@@ -310,7 +313,7 @@ impl<B: Buffer> IoUringBufRing<B> {
 
     /// # Safety
     ///
-    /// * Caller must make sure release valid buffer
+    /// * Caller must make sure release valid buffer.
     unsafe fn release_borrowed_buffer(&self, buf: &mut [MaybeUninit<u8>], bid: u16) {
         let mmap = &mut *self.buf_ring_mmap.get();
         mmap.add_buffer(buf, bid, self.mask(), 0);
@@ -381,7 +384,9 @@ impl<B: Buffer> IoUringBufRing<B> {
     }
 }
 
-/// Borrowed buffer from [`IoUringBufRing`]
+/// Borrowed buffer from [`IoUringBufRing`].
+///
+/// User can use it to access the filled data through Kernel.
 pub struct BorrowedBuffer<'a, B: Buffer> {
     buf: &'a mut B,
     len: usize,
