@@ -1,6 +1,6 @@
 [package]
 name = "io_uring_buf_ring"
-version = "0.1.0-dev.1"
+version = "0.1.0-dev.2"
 authors = ["Sherlock Holo <sherlockya@gmail.com>"]
 readme = "README.md"
 repository = "https://github.com/Sherlock-Holo/io_uring_buf_ring"
