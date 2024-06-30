@@ -44,7 +44,7 @@ dependencies = [
 name = "io_uring_buf_ring"
 version = "0.1.0"
 dependencies = [
-    "bytes",
+ "bytes",
  "io-uring",
  "rustix",
 ]

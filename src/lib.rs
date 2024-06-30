@@ -109,7 +109,7 @@ impl BufRingMmap {
                 MapFlags::PRIVATE,
             )
         }?;
-        // SAFETY: rustix checkes the pointer.
+        // SAFETY: rustix checks the pointer.
         let ptr = unsafe { NonNull::new_unchecked(ptr.cast()) };
 
         Ok(Self { ptr, len, size })
