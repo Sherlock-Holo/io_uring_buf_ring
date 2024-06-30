@@ -18,7 +18,7 @@ struct BufRingMmap {
 
 impl BufRingMmap {
     fn new(len: usize) -> io::Result<Self> {
-        let size = len * std::mem::size_of::<BufRingEntry>();
+        let size = len * size_of::<BufRingEntry>();
         // SAFETY: correctly aligned.
         let ptr = unsafe {
             mmap_anonymous(
@@ -51,7 +51,7 @@ impl BufRingMmap {
 
     /// # Safety
     ///
-    /// Caller must ensure the ring is not full.
+    /// Caller must ensure the ring is not full, and the `buf` lifecycle is long enough.
     unsafe fn add_buffer(
         &mut self,
         buf: &mut [MaybeUninit<u8>],
@@ -63,7 +63,7 @@ impl BufRingMmap {
         let index = ((tail.load(Ordering::Acquire) + (buf_offset as u16)) & mask) as usize;
 
         // SAFETY: only write plain data here
-        let buf_ring_entry = (&mut self.as_slice_uninit_mut()[index]).assume_init_mut();
+        let buf_ring_entry = self.as_slice_uninit_mut()[index].assume_init_mut();
 
         buf_ring_entry.set_addr(buf.as_ptr() as _);
         buf_ring_entry.set_len(buf.len() as _);
@@ -130,7 +130,7 @@ impl IoUringBufRing {
         B: Iterator<Item = Vec<u8>>,
     {
         let bufs = buffers.collect::<Vec<_>>();
-        if bufs.len() == 0 {
+        if bufs.is_empty() {
             return Err(io::Error::new(ErrorKind::InvalidInput, "empty buffers"));
         }
         let ring_entries = bufs.len().next_power_of_two();
@@ -235,7 +235,7 @@ impl IoUringBufRing {
 
     fn mask(&self) -> u16 {
         // Safety: we just get the bufs len to calculate the mask
-        unsafe { (&*self.buf_ring_mmap.get()).len() as u16 - 1 }
+        unsafe { (*self.buf_ring_mmap.get()).len() as u16 - 1 }
     }
 
     /// Add a new buffer to the ring.
@@ -249,8 +249,8 @@ impl IoUringBufRing {
         let bufs_len = bufs.len();
         let bid = bufs_len as _;
         let mut buf = buf.into();
-        let buf_slice = std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len());
-        bufs.push(buf.into());
+        let buf_slice = std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.capacity());
+        bufs.push(buf);
         let mmap = self.buf_ring_mmap.get_mut();
         mmap.add_buffer(buf_slice, bid, mask, 0);
         mmap.advance_buffers(1);
@@ -263,7 +263,7 @@ impl IoUringBufRing {
         let entries_len = self.buf_ring_mmap.get_mut().len();
         if bufs_len >= entries_len {
             return Err(io::Error::new(
-                io::ErrorKind::Other,
+                ErrorKind::Other,
                 "no spare space for new buffer",
             ));
         }
