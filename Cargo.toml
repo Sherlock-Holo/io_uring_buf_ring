@@ -1,6 +1,6 @@
 [package]
 name = "io_uring_buf_ring"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Sherlock Holo <sherlockya@gmail.com>"]
 readme = "README.md"
 repository = "https://github.com/Sherlock-Holo/io_uring_buf_ring"
@@ -18,4 +18,4 @@ bytes = ["dep:bytes"]
 [dependencies]
 bytes = { version = "1.9.0", optional = true }
 io-uring = "0.7.2"
-rustix = { version = "0.38.41", features = ["mm"] }
+rustix = { version = "1.0.7", features = ["mm"] }
