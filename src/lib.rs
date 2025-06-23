@@ -131,7 +131,7 @@ unsafe impl Buffer for Vec<u8> {
 /// # Safety
 ///
 /// The implement is safe.
-unsafe impl<'a> Buffer for &'a mut [u8] {
+unsafe impl Buffer for &mut [u8] {
     fn ptr(&self) -> *mut MaybeUninit<u8> {
         self.as_ptr().cast_mut().cast()
     }
@@ -143,7 +143,7 @@ unsafe impl<'a> Buffer for &'a mut [u8] {
     fn drop(self) {}
 }
 
-unsafe impl<'a, const N: usize> Buffer for &'a mut [u8; N] {
+unsafe impl<const N: usize> Buffer for &mut [u8; N] {
     fn ptr(&self) -> *mut MaybeUninit<u8> {
         self.as_ptr().cast_mut().cast()
     }
@@ -262,8 +262,8 @@ impl<B: Buffer> IoUringBufRing<B> {
     /// # Safety
     ///
     /// Caller must make sure there is only one [`BorrowedBuffer`] with the `id` at the same time.
-    pub unsafe fn get_buf(&self, id: u16, available_len: usize) -> Option<BorrowedBuffer<B>> {
-        let buf = (*self.bufs.get()).get_mut(id as usize)?;
+    pub unsafe fn get_buf(&self, id: u16, available_len: usize) -> Option<BorrowedBuffer<'_, B>> {
+        let buf = (&mut (*self.bufs.get())).get_mut(id as usize)?;
         debug_assert!(available_len <= buf.len());
 
         Some(BorrowedBuffer {
@@ -400,10 +400,7 @@ impl<B: Buffer> IoUringBufRing<B> {
         let bufs_len = self.bufs.get_mut().len();
         let entries_len = self.buf_ring_mmap.get_mut().len();
         if bufs_len >= entries_len {
-            return Err(io::Error::new(
-                ErrorKind::Other,
-                "no spare space for new buffer",
-            ));
+            return Err(io::Error::other("no spare space for new buffer"));
         }
         Ok(unsafe { self.add_unchecked(buf) })
     }
