@@ -207,6 +207,7 @@ pub struct IoUringBufRing<B: Buffer> {
 impl IoUringBufRing<Vec<u8>> {
     /// Create new [`IoUringBufRing`] with given `buf_group`, buffer size is `buf_size`, the buffer
     /// ring entry size will be `ring_entries.next_power_of_two()`.
+    #[deprecated(note = "please use `new_with_flags` instead")]
     pub fn new<S, C>(
         ring: &IoUring<S, C>,
         ring_entries: u16,
@@ -219,7 +220,25 @@ impl IoUringBufRing<Vec<u8>> {
     {
         let bufs = (0..ring_entries).map(|_| Vec::with_capacity(buf_size));
 
-        Self::new_with_buffers(ring, bufs, buf_group)
+        Self::new_with_buffers_and_flags(ring, bufs, buf_group, 0)
+    }
+
+    /// Create new [`IoUringBufRing`] with given `buf_group` and `flags`, buffer size is `buf_size`, the buffer
+    /// ring entry size will be `ring_entries.next_power_of_two()`.
+    pub fn new_with_flags<S, C>(
+        ring: &IoUring<S, C>,
+        ring_entries: u16,
+        buf_group: u16,
+        buf_size: usize,
+        flags: u16,
+    ) -> io::Result<Self>
+    where
+        S: squeue::EntryMarker,
+        C: cqueue::EntryMarker,
+    {
+        let bufs = (0..ring_entries).map(|_| Vec::with_capacity(buf_size));
+
+        Self::new_with_buffers_and_flags(ring, bufs, buf_group, flags)
     }
 }
 
@@ -231,10 +250,32 @@ impl<B: Buffer> IoUringBufRing<B> {
     ///
     /// If `buffers.len()` should be power of **2**, otherwise the entries will be extended.
     /// Users can call [`IoUringBufRing::add`] to fill the spare space with new buffers.
+    #[deprecated(note = "please use `new_with_buffers_and_flags` instead")]
     pub fn new_with_buffers<S, C, Buffers>(
         ring: &IoUring<S, C>,
         buffers: Buffers,
         buf_group: u16,
+    ) -> io::Result<Self>
+    where
+        S: squeue::EntryMarker,
+        C: cqueue::EntryMarker,
+        Buffers: IntoIterator<Item = B>,
+    {
+        Self::new_with_buffers_and_flags(ring, buffers, buf_group, 0)
+    }
+
+    /// Create new [`IoUringBufRing`] with given `buf_group`, `flags`, and custom buffers. The buf sizes in
+    /// buffers can be different.
+    ///
+    /// # Note
+    ///
+    /// If `buffers.len()` should be power of **2**, otherwise the entries will be extended.
+    /// Users can call [`IoUringBufRing::add`] to fill the spare space with new buffers.
+    pub fn new_with_buffers_and_flags<S, C, Buffers>(
+        ring: &IoUring<S, C>,
+        buffers: Buffers,
+        buf_group: u16,
+        flags: u16,
     ) -> io::Result<Self>
     where
         S: squeue::EntryMarker,
@@ -247,7 +288,7 @@ impl<B: Buffer> IoUringBufRing<B> {
         }
         let ring_entries = bufs.len().next_power_of_two();
 
-        let buf_ring_mmap = Self::create_buf_ring(ring, ring_entries as _, buf_group)?;
+        let buf_ring_mmap = Self::create_buf_ring(ring, ring_entries as _, buf_group, flags)?;
         let mut this = Self {
             buf_ring_mmap: ManuallyDrop::new(UnsafeCell::new(buf_ring_mmap)),
             bufs: ManuallyDrop::new(UnsafeCell::new(bufs)),
@@ -349,6 +390,7 @@ impl<B: Buffer> IoUringBufRing<B> {
         ring: &IoUring<S, C>,
         ring_entries: u16,
         buf_group: u16,
+        flags: u16,
     ) -> io::Result<BufRingMmap>
     where
         S: squeue::EntryMarker,
@@ -359,8 +401,12 @@ impl<B: Buffer> IoUringBufRing<B> {
         let slice = buf_ring_mmap.as_slice_uninit_mut();
         unsafe {
             // Safety: ring_entries are valid
-            ring.submitter()
-                .register_buf_ring(slice.as_ptr() as _, slice.len() as _, buf_group)?;
+            ring.submitter().register_buf_ring_with_flags(
+                slice.as_ptr() as _,
+                slice.len() as _,
+                buf_group,
+                flags,
+            )?;
 
             // Safety: no one write the tail at this moment
             *(BufRingEntry::tail(slice.as_ptr().cast()).cast_mut()) = 0;
@@ -452,7 +498,7 @@ mod tests {
     use io_uring::cqueue::buffer_select;
     use io_uring::opcode::Read;
     use io_uring::squeue::Flags;
-    use io_uring::types::Fd;
+    use io_uring::types::{Fd, IOU_PBUF_RING_INC};
 
     use super::*;
 
@@ -481,6 +527,20 @@ mod tests {
             &io_uring,
             [Vec::with_capacity(1), Vec::with_capacity(2)],
             1,
+        )
+        .unwrap();
+
+        unsafe { buf_ring.release(&io_uring).unwrap() }
+    }
+
+    #[test]
+    fn create_with_custom_buffers_and_flags_buf_ring() {
+        let io_uring = IoUring::new(1024).unwrap();
+        let buf_ring = IoUringBufRing::new_with_buffers_and_flags(
+            &io_uring,
+            [Vec::with_capacity(1), Vec::with_capacity(2)],
+            1,
+            IOU_PBUF_RING_INC as _,
         )
         .unwrap();
 

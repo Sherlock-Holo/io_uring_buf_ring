@@ -17,5 +17,5 @@ bytes = ["dep:bytes"]
 
 [dependencies]
 bytes = { version = "1.9.0", optional = true }
-io-uring = "0.7.2"
+io-uring = "0.7.11"
 rustix = { version = "1.0.7", features = ["mm"] }
