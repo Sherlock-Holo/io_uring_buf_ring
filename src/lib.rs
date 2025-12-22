@@ -23,6 +23,9 @@ struct BufRingMmap {
 // Safety: it can send to other thread
 unsafe impl Send for BufRingMmap {}
 
+// Safety: it can be shared between threads
+unsafe impl Sync for BufRingMmap {}
+
 impl BufRingMmap {
     fn new(len: usize) -> io::Result<Self> {
         let size = len * size_of::<BufRingEntry>();
@@ -203,6 +206,12 @@ pub struct IoUringBufRing<B: Buffer> {
     bufs: ManuallyDrop<UnsafeCell<Vec<B>>>,
     buf_group: u16,
 }
+
+// Safety: when use SyncUnsafeCell, it will auto implement Sync, that means implement Sync for
+// IoUringBufRing is safe
+//
+// TODO remove manual implement when SyncUnsafeCell is stable
+unsafe impl<B: Buffer + Sync> Sync for IoUringBufRing<B> {}
 
 impl IoUringBufRing<Vec<u8>> {
     /// Create new [`IoUringBufRing`] with given `buf_group`, buffer size is `buf_size`, the buffer
@@ -498,7 +507,7 @@ mod tests {
     use io_uring::cqueue::buffer_select;
     use io_uring::opcode::Read;
     use io_uring::squeue::Flags;
-    use io_uring::types::{Fd, IOU_PBUF_RING_INC};
+    use io_uring::types::Fd;
 
     use super::*;
 
@@ -540,7 +549,7 @@ mod tests {
             &io_uring,
             [Vec::with_capacity(1), Vec::with_capacity(2)],
             1,
-            IOU_PBUF_RING_INC as _,
+            0,
         )
         .unwrap();
 
