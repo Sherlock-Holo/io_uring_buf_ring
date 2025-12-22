@@ -507,7 +507,7 @@ mod tests {
     use io_uring::cqueue::buffer_select;
     use io_uring::opcode::Read;
     use io_uring::squeue::Flags;
-    use io_uring::types::{Fd, IOU_PBUF_RING_INC};
+    use io_uring::types::Fd;
 
     use super::*;
 
@@ -549,7 +549,7 @@ mod tests {
             &io_uring,
             [Vec::with_capacity(1), Vec::with_capacity(2)],
             1,
-            IOU_PBUF_RING_INC as _,
+            0,
         )
         .unwrap();
 
